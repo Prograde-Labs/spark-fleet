@@ -1,0 +1,49 @@
+[build-system]
+requires = ["hatchling>=1.27,<2"]
+build-backend = "hatchling.build"
+
+[project]
+name = "spark-fleet"
+dynamic = ["version"]
+description = "Multi-node DGX Spark workload control plane"
+requires-python = ">=3.12"
+dependencies = [
+  "docker>=7.1,<8",
+  "fastapi>=0.116,<1",
+  "httpx>=0.28,<1",
+  "huggingface-hub>=0.34,<2",
+  "pyyaml>=6.0,<7",
+  "uvicorn[standard]>=0.35,<1",
+]
+
+[project.optional-dependencies]
+dev = [
+  "pytest>=8.3,<9",
+  "pytest-asyncio>=0.24,<1",
+  "ruff>=0.12,<1",
+]
+
+[project.scripts]
+spark-fleet-controller = "spark_fleet.controller.main:main"
+spark-fleet-agent = "spark_fleet.agent.main:main"
+
+[tool.hatch.version]
+path = "src/spark_fleet/__init__.py"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/spark_fleet"]
+
+[tool.hatch.build.targets.sdist]
+include = ["src/spark_fleet", "tests", "README.md", "pyproject.toml"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src"]
+asyncio_mode = "auto"
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP"]

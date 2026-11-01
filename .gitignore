@@ -1,0 +1,29 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+build/
+dist/
+.venv/
+venv/
+
+# Test and lint caches
+.pytest_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# Node / web build
+web/node_modules/
+web/dist/
+
+# Runtime state
+data/
+*.sqlite
+*.sqlite-wal
+*.sqlite-shm
+logs/
+
+# Local configuration and secrets
+.env
+.env.local
