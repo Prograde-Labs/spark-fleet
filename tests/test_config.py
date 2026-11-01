@@ -239,9 +239,18 @@ def test_controller_rejects_blank_ui_password():
         load_controller_config({"SPARK_FLEET_AGENT_TOKEN": TOKEN, "SPARK_FLEET_UI_PASSWORD": "   "})
 
 
-def test_controller_rejects_token_with_surrounding_whitespace():
+@pytest.mark.parametrize("value", [" " + TOKEN, TOKEN + " "])
+def test_controller_rejects_token_with_surrounding_whitespace(value):
     with pytest.raises(ConfigError, match="leading or trailing whitespace"):
-        load_controller_config({"SPARK_FLEET_AGENT_TOKEN": " " + TOKEN})
+        load_controller_config({"SPARK_FLEET_AGENT_TOKEN": value})
+
+
+@pytest.mark.parametrize(
+    "value", ["bad token 12345678", "token\r\n1234567890", "tökén-token-123456"]
+)
+def test_controller_rejects_token_with_invalid_characters(value):
+    with pytest.raises(ConfigError, match="URL-safe characters"):
+        load_controller_config({"SPARK_FLEET_AGENT_TOKEN": value})
 
 
 def test_rollback_policy_accepts_underscore_alias():
@@ -285,4 +294,54 @@ def test_agent_rejects_relative_cache_root():
     with pytest.raises(ConfigError, match="must be an absolute path"):
         load_agent_config(
             {"SPARK_FLEET_AGENT_TOKEN": TOKEN, "SPARK_FLEET_MODEL_CACHE_ROOTS": "models"}
+        )
+
+
+def test_agent_rejects_empty_host():
+    with pytest.raises(ConfigError, match="SPARK_FLEET_AGENT_HOST must not be empty"):
+        load_agent_config({"SPARK_FLEET_AGENT_TOKEN": TOKEN, "SPARK_FLEET_AGENT_HOST": "  "})
+
+
+def test_agent_accepts_blank_node_id_as_unset():
+    config = load_agent_config(
+        {"SPARK_FLEET_AGENT_TOKEN": TOKEN, "SPARK_FLEET_AGENT_NODE_ID": "  "}
+    )
+
+    assert config.node_id is None
+
+
+def test_agent_config_repr_hides_token():
+    config = load_agent_config({"SPARK_FLEET_AGENT_TOKEN": TOKEN})
+
+    assert TOKEN not in repr(config)
+
+
+def test_controller_accepts_blank_web_dist_as_unset():
+    config = load_controller_config(
+        {"SPARK_FLEET_AGENT_TOKEN": TOKEN, "SPARK_FLEET_WEB_DIST": "  "}
+    )
+
+    assert config.web_dist is None
+
+
+def test_controller_rejects_relative_web_dist():
+    with pytest.raises(ConfigError, match="SPARK_FLEET_WEB_DIST must be an absolute path"):
+        load_controller_config({"SPARK_FLEET_AGENT_TOKEN": TOKEN, "SPARK_FLEET_WEB_DIST": "web"})
+
+
+def test_controller_rejects_unexpandable_path():
+    with pytest.raises(ConfigError, match="SPARK_FLEET_DATA_DIR could not be expanded"):
+        load_controller_config(
+            {"SPARK_FLEET_AGENT_TOKEN": TOKEN, "SPARK_FLEET_DATA_DIR": "~nosuchuser/models"}
+        )
+
+
+def test_controller_rejects_session_secret_with_surrounding_whitespace():
+    with pytest.raises(ConfigError, match="leading or trailing whitespace"):
+        load_controller_config(
+            {
+                "SPARK_FLEET_AGENT_TOKEN": TOKEN,
+                "SPARK_FLEET_UI_PASSWORD": "pw",
+                "SPARK_FLEET_SESSION_SECRET": " " + SECRET,
+            }
         )

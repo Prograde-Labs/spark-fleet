@@ -9,6 +9,7 @@ trimmed or echoed, and are excluded from dataclass ``repr`` output.
 from __future__ import annotations
 
 import os
+import re
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -20,6 +21,7 @@ MIN_SESSION_SECRET_LENGTH = 32
 DEFAULT_DATA_DIR = Path("/var/lib/spark-fleet")
 DEFAULT_AGENT_DATA_DIR = Path("/var/lib/spark-fleet-agent")
 DEFAULT_MODEL_CACHE_ROOT = Path("/srv/spark-fleet/hub")
+_TOKEN_PATTERN = re.compile(r"[A-Za-z0-9._~+/=-]+")
 
 
 class ConfigError(ValueError):
@@ -74,9 +76,7 @@ def _optional_str(env: Mapping[str, str], name: str) -> str | None:
     if raw is None:
         return None
     value = raw.strip()
-    if not value:
-        raise ConfigError(f"{name} must not be empty")
-    return value
+    return value or None
 
 
 def _required_str(env: Mapping[str, str], name: str, default: str) -> str:
@@ -103,7 +103,10 @@ def _int(env: Mapping[str, str], name: str, default: int, minimum: int, maximum:
 
 
 def _absolute_path(name: str, raw: str) -> Path:
-    path = Path(raw).expanduser()
+    try:
+        path = Path(raw).expanduser()
+    except RuntimeError as exc:
+        raise ConfigError(f"{name} could not be expanded, got {raw!r}") from exc
     if not path.is_absolute():
         raise ConfigError(f"{name} must be an absolute path, got {raw!r}")
     return path
@@ -125,7 +128,7 @@ def _optional_path(env: Mapping[str, str], name: str) -> Path | None:
         return None
     raw = raw.strip()
     if not raw:
-        raise ConfigError(f"{name} must not be empty")
+        return None
     return _absolute_path(name, raw)
 
 
@@ -134,6 +137,8 @@ def _agent_token(env: Mapping[str, str]) -> str:
     assert token is not None  # required=True raises instead of returning None
     if len(token) < MIN_TOKEN_LENGTH:
         raise ConfigError(f"SPARK_FLEET_AGENT_TOKEN must be at least {MIN_TOKEN_LENGTH} characters")
+    if not _TOKEN_PATTERN.fullmatch(token):
+        raise ConfigError("SPARK_FLEET_AGENT_TOKEN must contain only URL-safe characters")
     return token
 
 
