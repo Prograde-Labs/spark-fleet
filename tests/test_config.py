@@ -246,7 +246,15 @@ def test_controller_rejects_token_with_surrounding_whitespace(value):
 
 
 @pytest.mark.parametrize(
-    "value", ["bad token 12345678", "token\r\n1234567890", "tökén-token-123456"]
+    "value",
+    [
+        "bad token 12345678",
+        "token\r\n1234567890",
+        "tökén-token-123456",
+        "abc+def0123456789",
+        "abc/def0123456789",
+        "abcdef0123456789=",
+    ],
 )
 def test_controller_rejects_token_with_invalid_characters(value):
     with pytest.raises(ConfigError, match="URL-safe characters"):
@@ -254,14 +262,14 @@ def test_controller_rejects_token_with_invalid_characters(value):
 
 
 def test_controller_accepts_url_safe_token():
-    token = "AbCd-0123456789_xyz~"
+    token = "AbCd-0123456789_xyz~v1.2"
     config = load_controller_config({"SPARK_FLEET_AGENT_TOKEN": token})
 
     assert config.agent_token == token
 
 
 def test_agent_accepts_url_safe_token():
-    token = "AbCd-0123456789_xyz~"
+    token = "AbCd-0123456789_xyz~v1.2"
     config = load_agent_config({"SPARK_FLEET_AGENT_TOKEN": token})
 
     assert config.agent_token == token
@@ -362,7 +370,39 @@ def test_controller_rejects_session_secret_with_surrounding_whitespace(value):
         )
 
 
-@pytest.mark.parametrize("value", ["spark 02", "spark/02", "spark\n02", "spärk", "a" * 64])
+@pytest.mark.parametrize(
+    "value",
+    [
+        "spark 02",
+        "spark/02",
+        "spark\n02",
+        "spark-02\n",
+        "spark-02\r",
+        " spark-02 ",
+        "spärk",
+        ".",
+        "..",
+        "-",
+        "a" * 64,
+    ],
+)
 def test_agent_rejects_invalid_node_id(value):
     with pytest.raises(ConfigError, match="SPARK_FLEET_AGENT_NODE_ID"):
         load_agent_config({"SPARK_FLEET_AGENT_TOKEN": TOKEN, "SPARK_FLEET_AGENT_NODE_ID": value})
+
+
+def test_agent_accepts_node_id_at_max_length():
+    node_id = "a" * 63
+    config = load_agent_config(
+        {"SPARK_FLEET_AGENT_TOKEN": TOKEN, "SPARK_FLEET_AGENT_NODE_ID": node_id}
+    )
+
+    assert config.node_id == node_id
+
+
+def test_agent_accepts_node_id_with_dots_and_underscores():
+    config = load_agent_config(
+        {"SPARK_FLEET_AGENT_TOKEN": TOKEN, "SPARK_FLEET_AGENT_NODE_ID": "spark.02_1"}
+    )
+
+    assert config.node_id == "spark.02_1"

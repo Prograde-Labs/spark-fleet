@@ -22,7 +22,7 @@ DEFAULT_DATA_DIR = Path("/var/lib/spark-fleet")
 DEFAULT_AGENT_DATA_DIR = Path("/var/lib/spark-fleet-agent")
 DEFAULT_MODEL_CACHE_ROOT = Path("/srv/spark-fleet/hub")
 _TOKEN_PATTERN = re.compile(r"[A-Za-z0-9._~-]+")
-_NODE_ID_PATTERN = re.compile(r"[A-Za-z0-9._-]{1,63}")
+_NODE_ID_PATTERN = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,62}")
 
 
 class ConfigError(ValueError):
@@ -146,12 +146,14 @@ def _agent_token(env: Mapping[str, str]) -> str:
 
 
 def _node_id(env: Mapping[str, str]) -> str | None:
-    node_id = _optional_str(env, "SPARK_FLEET_AGENT_NODE_ID")
-    if node_id is None:
+    raw = env.get("SPARK_FLEET_AGENT_NODE_ID")
+    if raw is None or not raw.strip():
         return None
-    if not _NODE_ID_PATTERN.fullmatch(node_id):
-        raise ConfigError("SPARK_FLEET_AGENT_NODE_ID must match [A-Za-z0-9._-]{1,63}")
-    return node_id
+    if raw != raw.strip():
+        raise ConfigError("SPARK_FLEET_AGENT_NODE_ID must not have leading or trailing whitespace")
+    if not _NODE_ID_PATTERN.fullmatch(raw):
+        raise ConfigError("SPARK_FLEET_AGENT_NODE_ID must match [A-Za-z0-9][A-Za-z0-9._-]{0,62}")
+    return raw
 
 
 def _log_level(env: Mapping[str, str], name: str) -> str:
