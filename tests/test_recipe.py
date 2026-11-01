@@ -597,6 +597,8 @@ def test_same_published_port_on_different_nodes_allowed():
 
     recipe = parse_recipe(data)
 
+    assert recipe.spec.roles[0].service.ports == ["9000:9000"]
+    assert recipe.spec.roles[1].service.ports == ["9000:9000"]
     assert recipe.spec.roles[0].node != recipe.spec.roles[1].node
 
 
@@ -682,3 +684,91 @@ def test_pattern_error_truncates_long_value():
         parse_recipe(data)
 
     assert "..." in str(excinfo.value)
+
+
+def test_duplicate_keys_inside_merge_anchor_rejected():
+    text = """
+apiVersion: spark-fleet/v1
+kind: Recipe
+metadata:
+  name: merged-dup
+spec:
+  mode: service
+  runtime: custom
+  roles:
+    - name: svc
+      node: spark-01
+      class: light
+      service:
+        <<: &defaults
+          image: alpine
+          image: alpine:3.20
+"""
+
+    with pytest.raises(RecipeError, match="duplicate key 'image'"):
+        parse_recipe_yaml(text)
+
+
+def test_yaml_sequence_merge_allowed():
+    text = """
+apiVersion: spark-fleet/v1
+kind: Recipe
+metadata:
+  name: seq-merge
+spec:
+  mode: service
+  runtime: custom
+  roles:
+    - name: svc
+      node: spark-01
+      class: light
+      service:
+        <<: [&a {image: alpine}, &b {restart: always}]
+"""
+
+    recipe = parse_recipe_yaml(text)
+
+    assert recipe.spec.roles[0].service.image == "alpine"
+    assert recipe.spec.roles[0].service.restart == "always"
+
+
+def test_ephemeral_host_port_is_ignored():
+    data = copy.deepcopy(SERVICE)
+    data["spec"]["roles"][0]["service"]["ports"] = ["127.0.0.1::8080"]
+
+    recipe = parse_recipe(data)
+
+    assert recipe.spec.roles[0].service.ports == ["127.0.0.1::8080"]
+
+
+def test_duplicate_published_ports_within_service_rejected():
+    data = copy.deepcopy(SERVICE)
+    data["spec"]["roles"][0]["service"]["ports"] = ["9000:9000", "9000:9001"]
+
+    with pytest.raises(RecipeError, match="duplicate published port 9000"):
+        parse_recipe(data)
+
+
+def test_boolean_published_port_rejected():
+    data = copy.deepcopy(SERVICE)
+    data["spec"]["roles"][0]["service"]["ports"] = [{"target": 80, "published": True}]
+
+    with pytest.raises(RecipeError, match="boolean"):
+        parse_recipe(data)
+
+
+def test_float_published_port_rejected():
+    data = copy.deepcopy(SERVICE)
+    data["spec"]["roles"][0]["service"]["ports"] = [{"target": 80, "published": 8080.5}]
+
+    with pytest.raises(RecipeError, match="invalid published port"):
+        parse_recipe(data)
+
+
+def test_null_published_port_is_container_only():
+    data = copy.deepcopy(SERVICE)
+    data["spec"]["roles"][0]["service"]["ports"] = [{"target": 80, "published": None}]
+
+    recipe = parse_recipe(data)
+
+    assert recipe.spec.roles[0].service.ports == [{"target": 80, "published": None}]

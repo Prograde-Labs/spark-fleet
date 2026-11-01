@@ -274,22 +274,43 @@ def _published_ports(service: ServiceSpec) -> list[int]:
     """
 
     ports: list[int] = []
+    seen: set[int] = set()
+
+    def add(port: int) -> None:
+        if port in seen:
+            raise ValueError(f"duplicate published port {port} in service")
+        seen.add(port)
+        ports.append(port)
+
     for entry in service.ports:
         if isinstance(entry, dict):
             published = entry.get("published")
+            if isinstance(published, bool):
+                raise ValueError("published port must not be a boolean")
             if isinstance(published, int):
-                ports.append(_check_port(published, "published"))
+                add(_check_port(published, "published"))
             elif isinstance(published, str):
-                ports.extend(_expand_port_spec(published, "published"))
+                for port in _expand_port_spec(published, "published"):
+                    add(port)
+            elif published is not None:
+                raise ValueError(f"invalid published port: {published!r}")
             continue
         if not isinstance(entry, str):
             continue
 
         host_spec = entry.split("/", 1)[0]
-        if ":" not in host_spec:
+        parts = host_spec.split(":")
+        if len(parts) == 2:
+            host = parts[0]
+        elif len(parts) == 3:
+            host = parts[1]
+        else:
             continue
-        host = host_spec.split(":")[-2]
-        ports.extend(_expand_port_spec(host, "published"))
+        if not host:
+            # Ephemeral host port (e.g. "127.0.0.1::8080").
+            continue
+        for port in _expand_port_spec(host, "published"):
+            add(port)
     return ports
 
 
@@ -310,35 +331,56 @@ def _format_validation_error(exc: ValidationError) -> list[str]:
     return messages
 
 
-class _UniqueKeyLoader(yaml.SafeLoader):
-    """YAML loader that rejects duplicate mapping keys instead of silently overwriting."""
+_MERGE_TAG = "tag:yaml.org,2002:merge"
 
 
-def _construct_unique_mapping(loader: _UniqueKeyLoader, node: yaml.MappingNode, deep: bool = False):
-    explicit: dict[Any, Any] = {}
-    for key_node, _ in node.value:
-        if key_node.tag == "tag:yaml.org,2002:merge":
-            continue
-        key = loader.construct_object(key_node, deep=deep)
-        try:
-            duplicate = key in explicit
-        except TypeError as exc:
-            raise RecipeError([f"unhashable YAML key: {key!r}"]) from exc
-        if duplicate:
-            raise RecipeError([f"duplicate key {key!r} at line {key_node.start_mark.line + 1}"])
-        explicit[key] = None
+class _RecipeLoader(yaml.SafeLoader):
+    """YAML loader used for recipe parsing."""
 
+
+def _construct_mapping(loader: _RecipeLoader, node: yaml.MappingNode, deep: bool = False):
     loader.flatten_mapping(node)
     mapping: dict[Any, Any] = {}
     for key_node, value_node in node.value:
         key = loader.construct_object(key_node, deep=deep)
+        try:
+            hash(key)
+        except TypeError as exc:
+            raise RecipeError([f"unhashable YAML key: {key!r}"]) from exc
         mapping[key] = loader.construct_object(value_node, deep=deep)
     return mapping
 
 
-_UniqueKeyLoader.add_constructor(
-    yaml.resolver.BaseResolver.DEFAULT_MAPPING_TAG, _construct_unique_mapping
-)
+_RecipeLoader.add_constructor(yaml.resolver.BaseResolver.DEFAULT_MAPPING_TAG, _construct_mapping)
+
+
+def _reject_duplicate_keys(node: yaml.Node | None, visited: set[int]) -> None:
+    """Walk the composed YAML tree and reject duplicate keys in every mapping.
+
+    This runs before construction so duplicates inside merge anchors are caught
+    too, while merge keys themselves stay legal.
+    """
+
+    if node is None or id(node) in visited:
+        return
+    visited.add(id(node))
+
+    if isinstance(node, yaml.MappingNode):
+        seen: set[str] = set()
+        for key_node, value_node in node.value:
+            if key_node.tag == _MERGE_TAG:
+                _reject_duplicate_keys(value_node, visited)
+                continue
+            if isinstance(key_node, yaml.ScalarNode):
+                if key_node.value in seen:
+                    raise RecipeError(
+                        [f"duplicate key {key_node.value!r} at line {key_node.start_mark.line + 1}"]
+                    )
+                seen.add(key_node.value)
+            _reject_duplicate_keys(value_node, visited)
+    elif isinstance(node, yaml.SequenceNode):
+        for item in node.value:
+            _reject_duplicate_keys(item, visited)
 
 
 def parse_recipe(data: Mapping[str, Any]) -> Recipe:
@@ -356,7 +398,9 @@ def parse_recipe_yaml(text: str) -> Recipe:
     """Parse and validate a recipe from YAML text."""
 
     try:
-        data = yaml.load(text, Loader=_UniqueKeyLoader)
+        root = yaml.compose(text, Loader=_RecipeLoader)
+        _reject_duplicate_keys(root, set())
+        data = yaml.load(text, Loader=_RecipeLoader)
     except RecipeError:
         raise
     except yaml.YAMLError as exc:
