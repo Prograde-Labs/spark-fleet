@@ -510,13 +510,18 @@ def test_service_accepts_compose_list_and_long_forms():
     compose_service["volumes"] = [{"type": "bind", "source": "/a", "target": "/b"}]
     compose_service["devices"] = [{"host_path": "/dev/a", "container_path": "/dev/a"}]
     compose_service["shm_size"] = 1073741824
+    compose_service["gpus"] = ["device=0"]
 
     recipe = parse_recipe(data)
     parsed = recipe.spec.roles[0].service
 
     assert parsed.environment == ["FOO=bar", "EMPTY="]
+    assert parsed.labels == ["com.example=one"]
     assert parsed.ports == [{"target": 8080, "published": "8080", "protocol": "tcp"}]
+    assert parsed.volumes == [{"type": "bind", "source": "/a", "target": "/b"}]
+    assert parsed.devices == [{"host_path": "/dev/a", "container_path": "/dev/a"}]
     assert parsed.shm_size == 1073741824
+    assert parsed.gpus == ["device=0"]
 
 
 def test_load_recipe_file_rejects_invalid_utf8(tmp_path):
@@ -559,3 +564,121 @@ def test_yaml_round_trip_preserves_null_extra_key():
     assert "x-flag: null" in text
     again = parse_recipe_yaml(text)
     assert again.spec.roles[0].service.model_dump()["x-flag"] is None
+
+
+def test_inference_port_may_match_own_published_port():
+    data = copy.deepcopy(DEPLOYMENT)
+    data["spec"]["roles"][0]["service"]["ports"] = ["8888:8888"]
+
+    recipe = parse_recipe(data)
+
+    assert recipe.spec.roles[0].inference_port == 8888
+
+
+def test_container_only_ports_do_not_collide():
+    data = copy.deepcopy(DEPLOYMENT)
+    for role in data["spec"]["roles"]:
+        role["class"] = "light"
+        role["node"] = "spark-01"
+        del role["inferencePort"]
+        role["service"]["ports"] = [8080, "8080"]
+
+    recipe = parse_recipe(data)
+
+    assert len(recipe.spec.roles) == 2
+
+
+def test_same_published_port_on_different_nodes_allowed():
+    data = copy.deepcopy(DEPLOYMENT)
+    for role in data["spec"]["roles"]:
+        role["class"] = "light"
+        del role["inferencePort"]
+        role["service"]["ports"] = ["9000:9000"]
+
+    recipe = parse_recipe(data)
+
+    assert recipe.spec.roles[0].node != recipe.spec.roles[1].node
+
+
+@pytest.mark.parametrize(
+    "port_entry",
+    [
+        "9000-9002:9000-9002",
+        "127.0.0.1:9100:9100",
+        "9200:9200/udp",
+        {"target": 9300, "published": 9300},
+        {"target": 9400, "published": "9400-9401"},
+    ],
+)
+def test_published_port_shapes_are_claimed(port_entry):
+    data = copy.deepcopy(DEPLOYMENT)
+    for role in data["spec"]["roles"]:
+        role["class"] = "light"
+        role["node"] = "spark-01"
+        del role["inferencePort"]
+        role["service"]["ports"] = [port_entry]
+
+    with pytest.raises(RecipeError, match="duplicate port"):
+        parse_recipe(data)
+
+
+@pytest.mark.parametrize(
+    "port_entry",
+    ["9000-8000:9000-8000", "0:0", "70000:70000", "1-5000:1-5000", "9000-abc:9000-abc"],
+)
+def test_invalid_published_ports_rejected(port_entry):
+    data = copy.deepcopy(SERVICE)
+    data["spec"]["roles"][0]["service"]["ports"] = [port_entry]
+
+    with pytest.raises(RecipeError, match="port"):
+        parse_recipe(data)
+
+
+def test_yaml_merge_keys_allowed():
+    text = """
+apiVersion: spark-fleet/v1
+kind: Recipe
+metadata:
+  name: merged
+spec:
+  mode: service
+  runtime: custom
+  roles:
+    - name: svc
+      node: spark-01
+      class: light
+      service:
+        <<: &defaults
+          image: alpine
+          restart: always
+        image: alpine:3.20
+"""
+
+    recipe = parse_recipe_yaml(text)
+
+    assert recipe.spec.roles[0].service.image == "alpine:3.20"
+    assert recipe.spec.roles[0].service.restart == "always"
+
+
+@pytest.mark.parametrize("repo", ["../..", "./x", "org/..", ".hidden/x"])
+def test_repo_traversal_rejected(repo):
+    with pytest.raises(RecipeError, match="repo"):
+        parse_recipe(deployment(model={"repo": repo, "servedName": "x"}))
+
+
+def test_pattern_error_includes_offending_value():
+    data = copy.deepcopy(DEPLOYMENT)
+    data["metadata"]["name"] = "GLM 5.3"
+
+    with pytest.raises(RecipeError, match=r"GLM 5\.3"):
+        parse_recipe(data)
+
+
+def test_pattern_error_truncates_long_value():
+    data = copy.deepcopy(DEPLOYMENT)
+    data["metadata"]["name"] = "a" * 100
+
+    with pytest.raises(RecipeError) as excinfo:
+        parse_recipe(data)
+
+    assert "..." in str(excinfo.value)

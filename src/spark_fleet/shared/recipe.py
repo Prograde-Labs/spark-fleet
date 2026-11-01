@@ -16,17 +16,18 @@ from __future__ import annotations
 import re
 from collections.abc import Iterable, Mapping
 from pathlib import Path
-from typing import Any, Literal
+from typing import Any, Final, Literal
 
 import yaml
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator, model_validator
 
-API_VERSION = "spark-fleet/v1"
-KIND = "Recipe"
+API_VERSION: Final = "spark-fleet/v1"
+KIND: Final = "Recipe"
 NAME_PATTERN = r"^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$"
 NODE_ID_PATTERN = r"^[A-Za-z0-9][A-Za-z0-9._-]{0,62}$"
 ALIAS_PATTERN = r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$"
-REPO_PATTERN = r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$"
+REPO_SEGMENT_PATTERN = r"[A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?"
+REPO_PATTERN = rf"^{REPO_SEGMENT_PATTERN}/{REPO_SEGMENT_PATTERN}$"
 
 _ALIAS_RE = re.compile(ALIAS_PATTERN)
 _REPO_RE = re.compile(REPO_PATTERN)
@@ -186,9 +187,10 @@ class Spec(StrictModel):
 
         def claim_port(node: str, port: int, role_name: str, label: str) -> None:
             key = (node, port)
-            if key in ports_by_node:
+            owner = ports_by_node.get(key)
+            if owner is not None and owner != role_name:
                 raise ValueError(
-                    f"duplicate {label} {port} on node {node}: {ports_by_node[key]} and {role_name}"
+                    f"duplicate {label} {port} on node {node}: {owner} and {role_name}"
                 )
             ports_by_node[key] = role_name
 
@@ -239,34 +241,55 @@ class Recipe(StrictModel):
     spec: Spec
 
 
+_MAX_PORT_RANGE = 1024
+
+
+def _check_port(port: int, label: str) -> int:
+    if not 1 <= port <= 65535:
+        raise ValueError(f"{label} port out of range: {port}")
+    return port
+
+
+def _expand_port_spec(spec: str, label: str) -> list[int]:
+    if "-" in spec:
+        start, _, end = spec.partition("-")
+        if not (start.isascii() and start.isdigit() and end.isascii() and end.isdigit()):
+            raise ValueError(f"invalid {label} port range: {spec!r}")
+        low, high = int(start), int(end)
+        if low > high:
+            raise ValueError(f"invalid {label} port range: {spec!r}")
+        if high - low + 1 > _MAX_PORT_RANGE:
+            raise ValueError(f"{label} port range too large: {spec!r}")
+        return [_check_port(port, label) for port in range(low, high + 1)]
+    if not (spec.isascii() and spec.isdigit()):
+        raise ValueError(f"invalid {label} port: {spec!r}")
+    return [_check_port(int(spec), label)]
+
+
 def _published_ports(service: ServiceSpec) -> list[int]:
-    """Extract published host ports from Compose short and long port syntax."""
+    """Extract published host ports from Compose short and long port syntax.
+
+    Container-only entries (bare integers and ``"8080"``) are skipped because
+    Compose assigns them an ephemeral host port; they cannot collide.
+    """
 
     ports: list[int] = []
     for entry in service.ports:
-        if isinstance(entry, int):
-            ports.append(entry)
-            continue
         if isinstance(entry, dict):
             published = entry.get("published")
             if isinstance(published, int):
-                ports.append(published)
-            elif isinstance(published, str) and published.isdigit():
-                ports.append(int(published))
+                ports.append(_check_port(published, "published"))
+            elif isinstance(published, str):
+                ports.extend(_expand_port_spec(published, "published"))
             continue
         if not isinstance(entry, str):
             continue
 
-        host = entry.split("/", 1)[0]
-        parts = host.split(":")
-        if len(parts) >= 2:
-            host = parts[-2]
-        if "-" in host:
-            start, _, end = host.partition("-")
-            if start.isdigit() and end.isdigit():
-                ports.extend(range(int(start), int(end) + 1))
-        elif host.isdigit():
-            ports.append(int(host))
+        host_spec = entry.split("/", 1)[0]
+        if ":" not in host_spec:
+            continue
+        host = host_spec.split(":")[-2]
+        ports.extend(_expand_port_spec(host, "published"))
     return ports
 
 
@@ -292,16 +315,23 @@ class _UniqueKeyLoader(yaml.SafeLoader):
 
 
 def _construct_unique_mapping(loader: _UniqueKeyLoader, node: yaml.MappingNode, deep: bool = False):
+    explicit: dict[Any, Any] = {}
+    for key_node, _ in node.value:
+        if key_node.tag == "tag:yaml.org,2002:merge":
+            continue
+        key = loader.construct_object(key_node, deep=deep)
+        try:
+            duplicate = key in explicit
+        except TypeError as exc:
+            raise RecipeError([f"unhashable YAML key: {key!r}"]) from exc
+        if duplicate:
+            raise RecipeError([f"duplicate key {key!r} at line {key_node.start_mark.line + 1}"])
+        explicit[key] = None
+
     loader.flatten_mapping(node)
     mapping: dict[Any, Any] = {}
     for key_node, value_node in node.value:
         key = loader.construct_object(key_node, deep=deep)
-        try:
-            duplicate = key in mapping
-        except TypeError as exc:
-            raise RecipeError([f"unhashable YAML key: {key!r}"]) from exc
-        if duplicate:
-            raise RecipeError([f"duplicate key in YAML: {key!r}"])
         mapping[key] = loader.construct_object(value_node, deep=deep)
     return mapping
 
@@ -340,7 +370,7 @@ def load_recipe_file(path: Path) -> Recipe:
     """Read and validate a recipe YAML file."""
 
     try:
-        text = path.read_text()
+        text = path.read_text(encoding="utf-8")
     except (OSError, UnicodeDecodeError) as exc:
         raise RecipeError([f"could not read {path}: {exc}"]) from exc
     return parse_recipe_yaml(text)
