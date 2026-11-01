@@ -253,6 +253,20 @@ def test_controller_rejects_token_with_invalid_characters(value):
         load_controller_config({"SPARK_FLEET_AGENT_TOKEN": value})
 
 
+def test_controller_accepts_url_safe_token():
+    token = "AbCd-0123456789_xyz~"
+    config = load_controller_config({"SPARK_FLEET_AGENT_TOKEN": token})
+
+    assert config.agent_token == token
+
+
+def test_agent_accepts_url_safe_token():
+    token = "AbCd-0123456789_xyz~"
+    config = load_agent_config({"SPARK_FLEET_AGENT_TOKEN": token})
+
+    assert config.agent_token == token
+
+
 def test_rollback_policy_accepts_underscore_alias():
     config = load_controller_config(
         {"SPARK_FLEET_AGENT_TOKEN": TOKEN, "SPARK_FLEET_ROLLBACK_POLICY": "leave_down"}
@@ -336,12 +350,19 @@ def test_controller_rejects_unexpandable_path():
         )
 
 
-def test_controller_rejects_session_secret_with_surrounding_whitespace():
+@pytest.mark.parametrize("value", [" " + SECRET, SECRET + " "])
+def test_controller_rejects_session_secret_with_surrounding_whitespace(value):
     with pytest.raises(ConfigError, match="leading or trailing whitespace"):
         load_controller_config(
             {
                 "SPARK_FLEET_AGENT_TOKEN": TOKEN,
                 "SPARK_FLEET_UI_PASSWORD": "pw",
-                "SPARK_FLEET_SESSION_SECRET": " " + SECRET,
+                "SPARK_FLEET_SESSION_SECRET": value,
             }
         )
+
+
+@pytest.mark.parametrize("value", ["spark 02", "spark/02", "spark\n02", "spärk", "a" * 64])
+def test_agent_rejects_invalid_node_id(value):
+    with pytest.raises(ConfigError, match="SPARK_FLEET_AGENT_NODE_ID"):
+        load_agent_config({"SPARK_FLEET_AGENT_TOKEN": TOKEN, "SPARK_FLEET_AGENT_NODE_ID": value})

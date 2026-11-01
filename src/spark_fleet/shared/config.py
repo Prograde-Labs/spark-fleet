@@ -21,7 +21,8 @@ MIN_SESSION_SECRET_LENGTH = 32
 DEFAULT_DATA_DIR = Path("/var/lib/spark-fleet")
 DEFAULT_AGENT_DATA_DIR = Path("/var/lib/spark-fleet-agent")
 DEFAULT_MODEL_CACHE_ROOT = Path("/srv/spark-fleet/hub")
-_TOKEN_PATTERN = re.compile(r"[A-Za-z0-9._~+/=-]+")
+_TOKEN_PATTERN = re.compile(r"[A-Za-z0-9._~-]+")
+_NODE_ID_PATTERN = re.compile(r"[A-Za-z0-9._-]{1,63}")
 
 
 class ConfigError(ValueError):
@@ -138,8 +139,19 @@ def _agent_token(env: Mapping[str, str]) -> str:
     if len(token) < MIN_TOKEN_LENGTH:
         raise ConfigError(f"SPARK_FLEET_AGENT_TOKEN must be at least {MIN_TOKEN_LENGTH} characters")
     if not _TOKEN_PATTERN.fullmatch(token):
-        raise ConfigError("SPARK_FLEET_AGENT_TOKEN must contain only URL-safe characters")
+        raise ConfigError(
+            "SPARK_FLEET_AGENT_TOKEN must contain only unreserved URL-safe characters"
+        )
     return token
+
+
+def _node_id(env: Mapping[str, str]) -> str | None:
+    node_id = _optional_str(env, "SPARK_FLEET_AGENT_NODE_ID")
+    if node_id is None:
+        return None
+    if not _NODE_ID_PATTERN.fullmatch(node_id):
+        raise ConfigError("SPARK_FLEET_AGENT_NODE_ID must match [A-Za-z0-9._-]{1,63}")
+    return node_id
 
 
 def _log_level(env: Mapping[str, str], name: str) -> str:
@@ -234,7 +246,7 @@ def load_agent_config(env: Mapping[str, str] | None = None) -> AgentConfig:
     return AgentConfig(
         host=_required_str(env, "SPARK_FLEET_AGENT_HOST", "0.0.0.0"),
         port=_int(env, "SPARK_FLEET_AGENT_PORT", 8092, 1, 65535),
-        node_id=_optional_str(env, "SPARK_FLEET_AGENT_NODE_ID"),
+        node_id=_node_id(env),
         data_dir=data_dir,
         compose_projects_dir=_path(env, "SPARK_FLEET_COMPOSE_PROJECTS_DIR", data_dir / "projects"),
         model_cache_roots=_model_cache_roots(env),
