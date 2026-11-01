@@ -28,9 +28,8 @@ NODE_ID_PATTERN = r"^[A-Za-z0-9][A-Za-z0-9._-]{0,62}$"
 ALIAS_PATTERN = r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$"
 REPO_PATTERN = r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$"
 
-_NAME_RE = re.compile(NAME_PATTERN)
-_NODE_ID_RE = re.compile(NODE_ID_PATTERN)
 _ALIAS_RE = re.compile(ALIAS_PATTERN)
+_REPO_RE = re.compile(REPO_PATTERN)
 
 Runtime = Literal["vllm", "sglang", "llamacpp", "tensorfold", "comfyui", "custom"]
 RoleClass = Literal["heavy", "light"]
@@ -60,6 +59,18 @@ class ModelSpec(StrictModel):
     served_name: str = Field(alias="servedName", pattern=ALIAS_PATTERN)
     revision: str | None = None
     extra_repos: list[str] = Field(default_factory=list, alias="extraRepos")
+
+    @field_validator("extra_repos")
+    @classmethod
+    def _validate_extra_repos(cls, repos: list[str]) -> list[str]:
+        seen: set[str] = set()
+        for repo in repos:
+            if not _REPO_RE.fullmatch(repo):
+                raise ValueError(f"invalid extra repo: {repo!r}")
+            if repo in seen:
+                raise ValueError(f"duplicate extra repo: {repo}")
+            seen.add(repo)
+        return repos
 
 
 class GatewaySpec(StrictModel):
@@ -111,19 +122,21 @@ class ServiceSpec(BaseModel):
     image: str = Field(min_length=1)
     command: list[str] | str | None = None
     entrypoint: list[str] | str | None = None
-    environment: dict[str, str | int | float | bool] = Field(default_factory=dict)
-    volumes: list[str] = Field(default_factory=list)
-    ports: list[str | int] = Field(default_factory=list)
+    environment: dict[str, str | int | float | bool | None] | list[str] = Field(
+        default_factory=dict
+    )
+    volumes: list[str | dict[str, Any]] = Field(default_factory=list)
+    ports: list[str | int | dict[str, Any]] = Field(default_factory=list)
     network_mode: str | None = None
-    gpus: str | None = None
+    gpus: str | list[Any] | None = None
     ipc: str | None = None
-    shm_size: str | None = None
+    shm_size: str | int | None = None
     ulimits: dict[str, Any] | None = None
-    devices: list[str] = Field(default_factory=list)
+    devices: list[str | dict[str, Any]] = Field(default_factory=list)
     cap_add: list[str] = Field(default_factory=list)
     restart: str | None = None
     healthcheck: dict[str, Any] | None = None
-    labels: dict[str, str] = Field(default_factory=dict)
+    labels: dict[str, str] | list[str] = Field(default_factory=dict)
     working_dir: str | None = None
 
 
@@ -171,6 +184,14 @@ class Spec(StrictModel):
         heavy_by_node: dict[str, str] = {}
         ports_by_node: dict[tuple[str, int], str] = {}
 
+        def claim_port(node: str, port: int, role_name: str, label: str) -> None:
+            key = (node, port)
+            if key in ports_by_node:
+                raise ValueError(
+                    f"duplicate {label} {port} on node {node}: {ports_by_node[key]} and {role_name}"
+                )
+            ports_by_node[key] = role_name
+
         for role in self.roles:
             if role.name in names:
                 raise ValueError(f"duplicate role name: {role.name}")
@@ -185,13 +206,9 @@ class Spec(StrictModel):
                 heavy_by_node[role.node] = role.name
 
             if role.inference_port is not None:
-                key = (role.node, role.inference_port)
-                if key in ports_by_node:
-                    raise ValueError(
-                        f"duplicate inference port {role.inference_port} on node {role.node}: "
-                        f"{ports_by_node[key]} and {role.name}"
-                    )
-                ports_by_node[key] = role.name
+                claim_port(role.node, role.inference_port, role.name, "inference port")
+            for port in _published_ports(role.service):
+                claim_port(role.node, port, role.name, "port")
 
         if self.mode == "service":
             if len(self.roles) != 1:
@@ -216,10 +233,41 @@ class Spec(StrictModel):
 
 
 class Recipe(StrictModel):
-    api_version: Literal["spark-fleet/v1"] = Field(alias="apiVersion")
-    kind: Literal["Recipe"]
+    api_version: Literal[API_VERSION] = Field(alias="apiVersion")
+    kind: Literal[KIND]
     metadata: Metadata
     spec: Spec
+
+
+def _published_ports(service: ServiceSpec) -> list[int]:
+    """Extract published host ports from Compose short and long port syntax."""
+
+    ports: list[int] = []
+    for entry in service.ports:
+        if isinstance(entry, int):
+            ports.append(entry)
+            continue
+        if isinstance(entry, dict):
+            published = entry.get("published")
+            if isinstance(published, int):
+                ports.append(published)
+            elif isinstance(published, str) and published.isdigit():
+                ports.append(int(published))
+            continue
+        if not isinstance(entry, str):
+            continue
+
+        host = entry.split("/", 1)[0]
+        parts = host.split(":")
+        if len(parts) >= 2:
+            host = parts[-2]
+        if "-" in host:
+            start, _, end = host.partition("-")
+            if start.isdigit() and end.isdigit():
+                ports.extend(range(int(start), int(end) + 1))
+        elif host.isdigit():
+            ports.append(int(host))
+    return ports
 
 
 def _format_validation_error(exc: ValidationError) -> list[str]:
@@ -230,8 +278,37 @@ def _format_validation_error(exc: ValidationError) -> list[str]:
         prefix = "Value error, "
         if message.startswith(prefix):
             message = message[len(prefix) :]
+        if error["type"] in {"literal_error", "string_pattern_mismatch"} and "input" in error:
+            given = repr(error["input"])
+            if len(given) > 80:
+                given = given[:77] + "..."
+            message = f"{message} (got {given})"
         messages.append(f"{location}: {message}" if location else message)
     return messages
+
+
+class _UniqueKeyLoader(yaml.SafeLoader):
+    """YAML loader that rejects duplicate mapping keys instead of silently overwriting."""
+
+
+def _construct_unique_mapping(loader: _UniqueKeyLoader, node: yaml.MappingNode, deep: bool = False):
+    loader.flatten_mapping(node)
+    mapping: dict[Any, Any] = {}
+    for key_node, value_node in node.value:
+        key = loader.construct_object(key_node, deep=deep)
+        try:
+            duplicate = key in mapping
+        except TypeError as exc:
+            raise RecipeError([f"unhashable YAML key: {key!r}"]) from exc
+        if duplicate:
+            raise RecipeError([f"duplicate key in YAML: {key!r}"])
+        mapping[key] = loader.construct_object(value_node, deep=deep)
+    return mapping
+
+
+_UniqueKeyLoader.add_constructor(
+    yaml.resolver.BaseResolver.DEFAULT_MAPPING_TAG, _construct_unique_mapping
+)
 
 
 def parse_recipe(data: Mapping[str, Any]) -> Recipe:
@@ -249,7 +326,9 @@ def parse_recipe_yaml(text: str) -> Recipe:
     """Parse and validate a recipe from YAML text."""
 
     try:
-        data = yaml.safe_load(text)
+        data = yaml.load(text, Loader=_UniqueKeyLoader)
+    except RecipeError:
+        raise
     except yaml.YAMLError as exc:
         raise RecipeError([f"invalid YAML: {exc}"]) from exc
     if data is None:
@@ -262,15 +341,15 @@ def load_recipe_file(path: Path) -> Recipe:
 
     try:
         text = path.read_text()
-    except OSError as exc:
+    except (OSError, UnicodeDecodeError) as exc:
         raise RecipeError([f"could not read {path}: {exc}"]) from exc
     return parse_recipe_yaml(text)
 
 
 def recipe_to_yaml(recipe: Recipe) -> str:
-    """Serialize a recipe back to YAML, omitting unset optional fields."""
+    """Serialize a recipe back to YAML, omitting fields the author never set."""
 
-    data = recipe.model_dump(by_alias=True, exclude_none=True)
+    data = recipe.model_dump(by_alias=True, exclude_unset=True)
     return yaml.safe_dump(data, sort_keys=False)
 
 

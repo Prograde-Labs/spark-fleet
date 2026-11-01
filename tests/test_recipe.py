@@ -184,7 +184,7 @@ def test_rejects_bad_api_version():
     data = copy.deepcopy(DEPLOYMENT)
     data["apiVersion"] = "spark-fleet/v2"
 
-    with pytest.raises(RecipeError, match="apiVersion"):
+    with pytest.raises(RecipeError, match="spark-fleet/v2"):
         parse_recipe(data)
 
 
@@ -272,7 +272,8 @@ def test_duplicate_inference_port_on_same_node_rejected():
 def test_same_inference_port_on_different_nodes_allowed():
     recipe = parse_recipe(DEPLOYMENT)
 
-    assert recipe.spec.roles[0].inference_port == recipe.spec.roles[1].inference_port == 8888
+    assert recipe.spec.roles[0].inference_port == 8888
+    assert recipe.spec.roles[1].inference_port == 8888
 
 
 def test_duplicate_aliases_rejected():
@@ -283,7 +284,8 @@ def test_duplicate_aliases_rejected():
 def test_alias_may_repeat_served_name():
     recipe = parse_recipe(DEPLOYMENT)
 
-    assert recipe.spec.model.served_name in recipe.spec.gateway.aliases
+    assert recipe.spec.gateway.aliases == ["demo-glm", "Demo-Model-B"]
+    assert recipe.spec.model.served_name == "Demo-Model-B"
 
 
 def test_gateway_aliases_require_model():
@@ -396,14 +398,14 @@ def test_model_requires_repo_and_served_name():
 
 def test_compose_escape_hatch_preserves_unknown_keys():
     data = copy.deepcopy(SERVICE)
-    data["spec"]["roles"][0]["service"]["ulimits"] = {"memlock": {"soft": -1, "hard": -1}}
     data["spec"]["roles"][0]["service"]["stop_grace_period"] = "30s"
+    data["spec"]["roles"][0]["service"]["x-custom"] = {"a": 1}
 
     recipe = parse_recipe(data)
     dumped = recipe.spec.roles[0].service.model_dump()
 
-    assert dumped["ulimits"] == {"memlock": {"soft": -1, "hard": -1}}
     assert dumped["stop_grace_period"] == "30s"
+    assert dumped["x-custom"] == {"a": 1}
 
 
 def test_recipe_error_is_value_error():
@@ -423,3 +425,137 @@ def test_parse_yaml_rejects_invalid_yaml():
 def test_load_recipe_file_missing(tmp_path):
     with pytest.raises(RecipeError, match="could not read"):
         load_recipe_file(Path(tmp_path / "missing.yaml"))
+
+
+def test_parse_recipe_rejects_non_mapping():
+    with pytest.raises(RecipeError, match="must be a mapping"):
+        parse_recipe(["not", "a", "recipe"])
+
+
+def test_parse_yaml_rejects_sequence():
+    with pytest.raises(RecipeError, match="must be a mapping"):
+        parse_recipe_yaml("- one\n- two\n")
+
+
+def test_rejects_unknown_metadata_key():
+    data = copy.deepcopy(DEPLOYMENT)
+    data["metadata"]["owner"] = "chris"
+
+    with pytest.raises(RecipeError, match="owner"):
+        parse_recipe(data)
+
+
+def test_rejects_unknown_topology_key():
+    data = copy.deepcopy(DEPLOYMENT)
+    data["spec"]["topology"]["gpus"] = "all"
+
+    with pytest.raises(RecipeError, match="gpus"):
+        parse_recipe(data)
+
+
+def test_rejects_unknown_readiness_key():
+    data = copy.deepcopy(DEPLOYMENT)
+    data["spec"]["roles"][0]["readiness"]["command"] = "curl"
+
+    with pytest.raises(RecipeError, match="command"):
+        parse_recipe(data)
+
+
+def test_rejects_unknown_prepare_key():
+    data = copy.deepcopy(DEPLOYMENT)
+    data["spec"]["prepare"][0]["network"] = "host"
+
+    with pytest.raises(RecipeError, match="network"):
+        parse_recipe(data)
+
+
+def test_invalid_extra_repo_rejected():
+    with pytest.raises(RecipeError, match="invalid extra repo"):
+        parse_recipe(
+            deployment(model={"repo": "org/model", "servedName": "x", "extraRepos": ["not-a-repo"]})
+        )
+
+
+def test_duplicate_extra_repo_rejected():
+    with pytest.raises(RecipeError, match="duplicate extra repo"):
+        parse_recipe(
+            deployment(
+                model={
+                    "repo": "org/model",
+                    "servedName": "x",
+                    "extraRepos": ["org/a", "org/a"],
+                }
+            )
+        )
+
+
+def test_duplicate_service_port_on_same_node_rejected():
+    data = copy.deepcopy(DEPLOYMENT)
+    for role in data["spec"]["roles"]:
+        role["class"] = "light"
+        role["node"] = "spark-01"
+        del role["inferencePort"]
+        role["service"]["ports"] = ["9000:9000"]
+
+    with pytest.raises(RecipeError, match="duplicate port 9000"):
+        parse_recipe(data)
+
+
+def test_service_accepts_compose_list_and_long_forms():
+    data = copy.deepcopy(SERVICE)
+    compose_service = data["spec"]["roles"][0]["service"]
+    compose_service["environment"] = ["FOO=bar", "EMPTY="]
+    compose_service["labels"] = ["com.example=one"]
+    compose_service["ports"] = [{"target": 8080, "published": "8080", "protocol": "tcp"}]
+    compose_service["volumes"] = [{"type": "bind", "source": "/a", "target": "/b"}]
+    compose_service["devices"] = [{"host_path": "/dev/a", "container_path": "/dev/a"}]
+    compose_service["shm_size"] = 1073741824
+
+    recipe = parse_recipe(data)
+    parsed = recipe.spec.roles[0].service
+
+    assert parsed.environment == ["FOO=bar", "EMPTY="]
+    assert parsed.ports == [{"target": 8080, "published": "8080", "protocol": "tcp"}]
+    assert parsed.shm_size == 1073741824
+
+
+def test_load_recipe_file_rejects_invalid_utf8(tmp_path):
+    path = tmp_path / "recipe.yaml"
+    path.write_bytes(b"\xff\xfe\x00")
+
+    with pytest.raises(RecipeError, match="could not read"):
+        load_recipe_file(path)
+
+
+def test_parse_yaml_rejects_duplicate_keys():
+    text = (
+        "apiVersion: spark-fleet/v1\n"
+        "kind: Recipe\n"
+        "kind: Recipe\n"
+        "metadata:\n  name: dup\n"
+        "spec:\n  mode: service\n  runtime: custom\n  roles: []\n"
+    )
+
+    with pytest.raises(RecipeError, match="duplicate key"):
+        parse_recipe_yaml(text)
+
+
+def test_validate_against_nodes_reports_all_errors():
+    with pytest.raises(RecipeError) as excinfo:
+        validate_against_nodes(parse_recipe(DEPLOYMENT), {"spark-02"})
+
+    assert len(excinfo.value.errors) == 2
+    assert "role head" in excinfo.value.errors[0]
+    assert "prepare stage-overlays" in excinfo.value.errors[1]
+
+
+def test_yaml_round_trip_preserves_null_extra_key():
+    data = copy.deepcopy(SERVICE)
+    data["spec"]["roles"][0]["service"]["x-flag"] = None
+
+    recipe = parse_recipe(data)
+    text = recipe_to_yaml(recipe)
+
+    assert "x-flag: null" in text
+    again = parse_recipe_yaml(text)
+    assert again.spec.roles[0].service.model_dump()["x-flag"] is None
