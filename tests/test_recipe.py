@@ -772,3 +772,96 @@ def test_null_published_port_is_container_only():
     recipe = parse_recipe(data)
 
     assert recipe.spec.roles[0].service.ports == [{"target": 80, "published": None}]
+
+
+def test_tcp_and_udp_same_port_allowed():
+    data = copy.deepcopy(SERVICE)
+    data["spec"]["roles"][0]["service"]["ports"] = ["53:53/tcp", "53:53/udp"]
+
+    recipe = parse_recipe(data)
+
+    assert recipe.spec.roles[0].service.ports == ["53:53/tcp", "53:53/udp"]
+
+
+def test_ipv6_published_port_collision_rejected():
+    data = copy.deepcopy(DEPLOYMENT)
+    for role in data["spec"]["roles"]:
+        role["class"] = "light"
+        role["node"] = "spark-01"
+        del role["inferencePort"]
+        role["service"]["ports"] = ["[::1]:9000:9000"]
+
+    with pytest.raises(RecipeError, match="duplicate port 9000"):
+        parse_recipe(data)
+
+
+def test_resolved_duplicate_yaml_keys_rejected():
+    text = """
+apiVersion: spark-fleet/v1
+kind: Recipe
+metadata:
+  name: bool-keys
+spec:
+  mode: service
+  runtime: custom
+  roles:
+    - name: svc
+      node: spark-01
+      class: light
+      service:
+        image: alpine
+        x-a: 1
+        true: 2
+        yes: 3
+"""
+
+    with pytest.raises(RecipeError, match="duplicate key True"):
+        parse_recipe_yaml(text)
+
+
+def test_merge_sequence_anchor_duplicate_rejected():
+    text = """
+apiVersion: spark-fleet/v1
+kind: Recipe
+metadata:
+  name: seq-dup
+spec:
+  mode: service
+  runtime: custom
+  roles:
+    - name: svc
+      node: spark-01
+      class: light
+      service:
+        <<: [&a {image: alpine, image: alpine:3.20}]
+"""
+
+    with pytest.raises(RecipeError, match="duplicate key 'image'"):
+        parse_recipe_yaml(text)
+
+
+def test_cross_shape_published_duplicate_rejected():
+    data = copy.deepcopy(SERVICE)
+    data["spec"]["roles"][0]["service"]["ports"] = ["9000-9001:9000-9001", "9001:9001"]
+
+    with pytest.raises(RecipeError, match="duplicate published port 9001"):
+        parse_recipe(data)
+
+
+def test_long_form_and_short_form_duplicate_rejected():
+    data = copy.deepcopy(SERVICE)
+    data["spec"]["roles"][0]["service"]["ports"] = [
+        {"target": 9000, "published": "9000"},
+        "9000:9000",
+    ]
+
+    with pytest.raises(RecipeError, match="duplicate published port 9000"):
+        parse_recipe(data)
+
+
+def test_invalid_port_protocol_rejected():
+    data = copy.deepcopy(SERVICE)
+    data["spec"]["roles"][0]["service"]["ports"] = ["9000:9000/xyz"]
+
+    with pytest.raises(RecipeError, match="invalid port protocol"):
+        parse_recipe(data)

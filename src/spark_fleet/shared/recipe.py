@@ -183,14 +183,17 @@ class Spec(StrictModel):
 
         names: set[str] = set()
         heavy_by_node: dict[str, str] = {}
-        ports_by_node: dict[tuple[str, int], str] = {}
+        ports_by_node: dict[tuple[str, int, str], str] = {}
 
-        def claim_port(node: str, port: int, role_name: str, label: str) -> None:
-            key = (node, port)
+        def claim_port(
+            node: str, port: int, role_name: str, label: str, protocol: str = "tcp"
+        ) -> None:
+            key = (node, port, protocol)
             owner = ports_by_node.get(key)
             if owner is not None and owner != role_name:
+                shown = f"{port}/{protocol}" if protocol != "tcp" else f"{port}"
                 raise ValueError(
-                    f"duplicate {label} {port} on node {node}: {owner} and {role_name}"
+                    f"duplicate {label} {shown} on node {node}: {owner} and {role_name}"
                 )
             ports_by_node[key] = role_name
 
@@ -209,8 +212,8 @@ class Spec(StrictModel):
 
             if role.inference_port is not None:
                 claim_port(role.node, role.inference_port, role.name, "inference port")
-            for port in _published_ports(role.service):
-                claim_port(role.node, port, role.name, "port")
+            for port, protocol in _published_ports(role.service):
+                claim_port(role.node, port, role.name, "port", protocol)
 
         if self.mode == "service":
             if len(self.roles) != 1:
@@ -266,40 +269,55 @@ def _expand_port_spec(spec: str, label: str) -> list[int]:
     return [_check_port(int(spec), label)]
 
 
-def _published_ports(service: ServiceSpec) -> list[int]:
-    """Extract published host ports from Compose short and long port syntax.
+def _published_ports(service: ServiceSpec) -> list[tuple[int, str]]:
+    """Extract published host ports (and protocols) from Compose port syntax.
 
     Container-only entries (bare integers and ``"8080"``) are skipped because
     Compose assigns them an ephemeral host port; they cannot collide.
     """
 
-    ports: list[int] = []
-    seen: set[int] = set()
+    ports: list[tuple[int, str]] = []
+    seen: set[tuple[int, str]] = set()
 
-    def add(port: int) -> None:
-        if port in seen:
-            raise ValueError(f"duplicate published port {port} in service")
-        seen.add(port)
-        ports.append(port)
+    def add(port: int, protocol: str) -> None:
+        key = (port, protocol)
+        if key in seen:
+            raise ValueError(f"duplicate published port {port}/{protocol} in service")
+        seen.add(key)
+        ports.append(key)
 
     for entry in service.ports:
         if isinstance(entry, dict):
             published = entry.get("published")
+            protocol = entry.get("protocol", "tcp")
+            if not isinstance(protocol, str):
+                raise ValueError(f"invalid port protocol: {protocol!r}")
+            protocol = protocol.lower()
+            if protocol not in _PORT_PROTOCOLS:
+                raise ValueError(f"invalid port protocol: {protocol!r}")
             if isinstance(published, bool):
                 raise ValueError("published port must not be a boolean")
             if isinstance(published, int):
-                add(_check_port(published, "published"))
+                add(_check_port(published, "published"), protocol)
             elif isinstance(published, str):
                 for port in _expand_port_spec(published, "published"):
-                    add(port)
+                    add(port, protocol)
             elif published is not None:
                 raise ValueError(f"invalid published port: {published!r}")
             continue
         if not isinstance(entry, str):
             continue
 
-        host_spec = entry.split("/", 1)[0]
-        parts = host_spec.split(":")
+        port_spec, _, protocol = entry.partition("/")
+        protocol = protocol.lower() or "tcp"
+        if protocol not in _PORT_PROTOCOLS:
+            raise ValueError(f"invalid port protocol: {protocol!r}")
+        if port_spec.startswith("["):
+            closing = port_spec.find("]:")
+            if closing == -1:
+                continue
+            port_spec = port_spec[closing + 2 :]
+        parts = port_spec.split(":")
         if len(parts) == 2:
             host = parts[0]
         elif len(parts) == 3:
@@ -310,7 +328,7 @@ def _published_ports(service: ServiceSpec) -> list[int]:
             # Ephemeral host port (e.g. "127.0.0.1::8080").
             continue
         for port in _expand_port_spec(host, "published"):
-            add(port)
+            add(port, protocol)
     return ports
 
 
@@ -332,6 +350,7 @@ def _format_validation_error(exc: ValidationError) -> list[str]:
 
 
 _MERGE_TAG = "tag:yaml.org,2002:merge"
+_PORT_PROTOCOLS = {"tcp", "udp", "sctp"}
 
 
 class _RecipeLoader(yaml.SafeLoader):
@@ -354,10 +373,13 @@ def _construct_mapping(loader: _RecipeLoader, node: yaml.MappingNode, deep: bool
 _RecipeLoader.add_constructor(yaml.resolver.BaseResolver.DEFAULT_MAPPING_TAG, _construct_mapping)
 
 
-def _reject_duplicate_keys(node: yaml.Node | None, visited: set[int]) -> None:
+def _reject_duplicate_keys(
+    node: yaml.Node | None, visited: set[int], loader: _RecipeLoader
+) -> None:
     """Walk the composed YAML tree and reject duplicate keys in every mapping.
 
-    This runs before construction so duplicates inside merge anchors are caught
+    Keys are resolved through the loader (so ``true`` and ``yes`` collide), and
+    this runs before construction so duplicates inside merge anchors are caught
     too, while merge keys themselves stay legal.
     """
 
@@ -366,21 +388,23 @@ def _reject_duplicate_keys(node: yaml.Node | None, visited: set[int]) -> None:
     visited.add(id(node))
 
     if isinstance(node, yaml.MappingNode):
-        seen: set[str] = set()
+        seen: set[Any] = set()
         for key_node, value_node in node.value:
             if key_node.tag == _MERGE_TAG:
-                _reject_duplicate_keys(value_node, visited)
+                _reject_duplicate_keys(value_node, visited, loader)
                 continue
-            if isinstance(key_node, yaml.ScalarNode):
-                if key_node.value in seen:
-                    raise RecipeError(
-                        [f"duplicate key {key_node.value!r} at line {key_node.start_mark.line + 1}"]
-                    )
-                seen.add(key_node.value)
-            _reject_duplicate_keys(value_node, visited)
+            key = loader.construct_object(key_node)
+            try:
+                duplicate = key in seen
+            except TypeError as exc:
+                raise RecipeError([f"unhashable YAML key: {key!r}"]) from exc
+            if duplicate:
+                raise RecipeError([f"duplicate key {key!r} at line {key_node.start_mark.line + 1}"])
+            seen.add(key)
+            _reject_duplicate_keys(value_node, visited, loader)
     elif isinstance(node, yaml.SequenceNode):
         for item in node.value:
-            _reject_duplicate_keys(item, visited)
+            _reject_duplicate_keys(item, visited, loader)
 
 
 def parse_recipe(data: Mapping[str, Any]) -> Recipe:
@@ -397,10 +421,11 @@ def parse_recipe(data: Mapping[str, Any]) -> Recipe:
 def parse_recipe_yaml(text: str) -> Recipe:
     """Parse and validate a recipe from YAML text."""
 
+    loader = _RecipeLoader(text)
     try:
-        root = yaml.compose(text, Loader=_RecipeLoader)
-        _reject_duplicate_keys(root, set())
-        data = yaml.load(text, Loader=_RecipeLoader)
+        root = loader.get_single_node()
+        _reject_duplicate_keys(root, set(), loader)
+        data = loader.construct_document(root) if root is not None else None
     except RecipeError:
         raise
     except yaml.YAMLError as exc:
