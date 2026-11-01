@@ -1,6 +1,5 @@
 """Smoke tests for the spark-fleet package scaffold."""
 
-import importlib
 from importlib.metadata import distribution, version
 
 import spark_fleet
@@ -11,20 +10,25 @@ EXPECTED_SCRIPTS = {
 }
 
 
+def _console_scripts():
+    return [ep for ep in distribution("spark-fleet").entry_points if ep.group == "console_scripts"]
+
+
 def test_package_version_matches_installed_metadata():
-    assert spark_fleet.__version__ == version("spark-fleet")
+    assert spark_fleet.__version__ == version("spark-fleet"), (
+        "installed metadata is stale; reinstall the editable package"
+    )
 
 
-def test_console_scripts_are_declared_on_our_distribution():
-    declared = {ep.name: ep.value for ep in distribution("spark-fleet").entry_points}
-    assert {name: declared[name] for name in EXPECTED_SCRIPTS} == EXPECTED_SCRIPTS
+def test_console_scripts_match_expected_set():
+    declared = {ep.name: ep.value for ep in _console_scripts()}
+    assert declared == EXPECTED_SCRIPTS, f"unexpected console scripts: {declared}"
 
 
-def test_console_script_targets_resolve_to_callables():
-    for target in EXPECTED_SCRIPTS.values():
-        module_name, _, attr = target.partition(":")
-        module = importlib.import_module(module_name)
-        assert callable(getattr(module, attr))
+def test_console_scripts_load_callables():
+    for ep in _console_scripts():
+        target = ep.load()
+        assert callable(target), f"{ep.name} does not resolve to a callable"
 
 
 def test_package_has_docstring():

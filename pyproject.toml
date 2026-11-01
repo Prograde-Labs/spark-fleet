@@ -6,6 +6,7 @@ build-backend = "hatchling.build"
 name = "spark-fleet"
 dynamic = ["version"]
 description = "Multi-node DGX Spark workload control plane"
+readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
   "docker>=7.1,<8",
