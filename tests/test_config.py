@@ -1,5 +1,6 @@
 """Tests for the shared controller/agent configuration loader."""
 
+import os
 from pathlib import Path
 
 import pytest
@@ -65,8 +66,11 @@ def test_controller_overrides():
 
 
 def test_controller_reads_process_environment(monkeypatch):
-    monkeypatch.setenv("SPARK_FLEET_AGENT_TOKEN", TOKEN)
-    monkeypatch.setenv("SPARK_FLEET_CONTROLLER_PORT", "9090")
+    monkeypatch.setattr(
+        os,
+        "environ",
+        {"SPARK_FLEET_AGENT_TOKEN": TOKEN, "SPARK_FLEET_CONTROLLER_PORT": "9090"},
+    )
 
     assert load_controller_config().port == 9090
 
@@ -187,3 +191,98 @@ def test_agent_rejects_invalid_port(value):
 
 def test_config_error_is_value_error():
     assert issubclass(ConfigError, ValueError)
+
+
+def test_controller_rejects_empty_host():
+    with pytest.raises(ConfigError, match="SPARK_FLEET_CONTROLLER_HOST must not be empty"):
+        load_controller_config(
+            {"SPARK_FLEET_AGENT_TOKEN": TOKEN, "SPARK_FLEET_CONTROLLER_HOST": "  "}
+        )
+
+
+def test_controller_rejects_empty_data_dir():
+    with pytest.raises(ConfigError, match="SPARK_FLEET_DATA_DIR must not be empty"):
+        load_controller_config({"SPARK_FLEET_AGENT_TOKEN": TOKEN, "SPARK_FLEET_DATA_DIR": ""})
+
+
+def test_controller_rejects_relative_data_dir():
+    with pytest.raises(ConfigError, match="SPARK_FLEET_DATA_DIR must be an absolute path"):
+        load_controller_config({"SPARK_FLEET_AGENT_TOKEN": TOKEN, "SPARK_FLEET_DATA_DIR": "data"})
+
+
+@pytest.mark.parametrize("value", ["8_091", "+8091", "\u0668\u0660\u0669\u0661"])
+def test_controller_rejects_malformed_integer(value):
+    with pytest.raises(ConfigError, match="SPARK_FLEET_CONTROLLER_PORT"):
+        load_controller_config(
+            {"SPARK_FLEET_AGENT_TOKEN": TOKEN, "SPARK_FLEET_CONTROLLER_PORT": value}
+        )
+
+
+def test_controller_rejects_zero_node_poll_interval():
+    with pytest.raises(ConfigError, match="SPARK_FLEET_NODE_POLL_INTERVAL_SECONDS"):
+        load_controller_config(
+            {"SPARK_FLEET_AGENT_TOKEN": TOKEN, "SPARK_FLEET_NODE_POLL_INTERVAL_SECONDS": "0"}
+        )
+
+
+def test_controller_derived_paths_follow_data_dir():
+    config = load_controller_config(
+        {"SPARK_FLEET_AGENT_TOKEN": TOKEN, "SPARK_FLEET_DATA_DIR": "/srv/fleet"}
+    )
+
+    assert config.recipes_dir == Path("/srv/fleet/recipes")
+    assert config.db_path == Path("/srv/fleet/fleet.sqlite")
+
+
+def test_controller_rejects_blank_ui_password():
+    with pytest.raises(ConfigError, match="SPARK_FLEET_UI_PASSWORD must not be empty"):
+        load_controller_config({"SPARK_FLEET_AGENT_TOKEN": TOKEN, "SPARK_FLEET_UI_PASSWORD": "   "})
+
+
+def test_controller_rejects_token_with_surrounding_whitespace():
+    with pytest.raises(ConfigError, match="leading or trailing whitespace"):
+        load_controller_config({"SPARK_FLEET_AGENT_TOKEN": " " + TOKEN})
+
+
+def test_rollback_policy_accepts_underscore_alias():
+    config = load_controller_config(
+        {"SPARK_FLEET_AGENT_TOKEN": TOKEN, "SPARK_FLEET_ROLLBACK_POLICY": "leave_down"}
+    )
+
+    assert config.rollback_policy == "leave-down"
+
+
+def test_config_repr_hides_secrets():
+    password = "hunter2-password"
+    config = load_controller_config(
+        {
+            "SPARK_FLEET_AGENT_TOKEN": TOKEN,
+            "SPARK_FLEET_UI_PASSWORD": password,
+            "SPARK_FLEET_SESSION_SECRET": SECRET,
+        }
+    )
+
+    rendered = repr(config)
+    assert TOKEN not in rendered
+    assert SECRET not in rendered
+    assert password not in rendered
+
+
+def test_agent_derived_projects_dir_follows_data_dir():
+    config = load_agent_config(
+        {"SPARK_FLEET_AGENT_TOKEN": TOKEN, "SPARK_FLEET_AGENT_DATA_DIR": "/srv/agent"}
+    )
+
+    assert config.compose_projects_dir == Path("/srv/agent/projects")
+
+
+def test_agent_rejects_unknown_log_level():
+    with pytest.raises(ConfigError, match="SPARK_FLEET_LOG_LEVEL"):
+        load_agent_config({"SPARK_FLEET_AGENT_TOKEN": TOKEN, "SPARK_FLEET_LOG_LEVEL": "LOUD"})
+
+
+def test_agent_rejects_relative_cache_root():
+    with pytest.raises(ConfigError, match="must be an absolute path"):
+        load_agent_config(
+            {"SPARK_FLEET_AGENT_TOKEN": TOKEN, "SPARK_FLEET_MODEL_CACHE_ROOTS": "models"}
+        )

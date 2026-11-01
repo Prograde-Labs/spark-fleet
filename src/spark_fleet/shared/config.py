@@ -2,14 +2,15 @@
 
 Every value comes from the process environment (or an explicit mapping in
 tests). Invalid values raise :class:`ConfigError` naming the offending variable
-so a failed container start explains itself.
+so a failed container start explains itself. Secrets are validated without being
+trimmed or echoed, and are excluded from dataclass ``repr`` output.
 """
 
 from __future__ import annotations
 
 import os
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 LOG_LEVELS = ("DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL")
@@ -33,14 +34,14 @@ class ControllerConfig:
     recipes_dir: Path
     db_path: Path
     web_dist: Path | None
-    agent_token: str
-    ui_password: str | None
-    session_secret: str | None
-    rollback_policy: str
-    metrics_retention_seconds: int
-    metrics_sample_interval_seconds: int
-    node_poll_interval_seconds: int
-    log_level: str
+    agent_token: str = field(repr=False)
+    ui_password: str | None = field(repr=False)
+    session_secret: str | None = field(repr=False)
+    rollback_policy: str = "restore"
+    metrics_retention_seconds: int = 86400
+    metrics_sample_interval_seconds: int = 10
+    node_poll_interval_seconds: int = 15
+    log_level: str = "INFO"
 
 
 @dataclass(frozen=True)
@@ -51,8 +52,21 @@ class AgentConfig:
     data_dir: Path
     compose_projects_dir: Path
     model_cache_roots: tuple[Path, ...]
-    agent_token: str
-    log_level: str
+    agent_token: str = field(repr=False)
+    log_level: str = "INFO"
+
+
+def _secret(env: Mapping[str, str], name: str, *, required: bool = False) -> str | None:
+    raw = env.get(name)
+    if raw is None:
+        if required:
+            raise ConfigError(f"{name} is required")
+        return None
+    if not raw.strip():
+        raise ConfigError(f"{name} must not be empty")
+    if raw != raw.strip():
+        raise ConfigError(f"{name} must not have leading or trailing whitespace")
+    return raw
 
 
 def _optional_str(env: Mapping[str, str], name: str) -> str | None:
@@ -60,15 +74,18 @@ def _optional_str(env: Mapping[str, str], name: str) -> str | None:
     if raw is None:
         return None
     value = raw.strip()
-    return value or None
+    if not value:
+        raise ConfigError(f"{name} must not be empty")
+    return value
 
 
-def _required_str(env: Mapping[str, str], name: str, default: str | None = None) -> str:
-    value = _optional_str(env, name)
-    if value is None:
-        if default is None:
-            raise ConfigError(f"{name} is required")
+def _required_str(env: Mapping[str, str], name: str, default: str) -> str:
+    raw = env.get(name)
+    if raw is None:
         return default
+    value = raw.strip()
+    if not value:
+        raise ConfigError(f"{name} must not be empty")
     return value
 
 
@@ -77,15 +94,19 @@ def _int(env: Mapping[str, str], name: str, default: int, minimum: int, maximum:
     if raw is None:
         return default
     raw = raw.strip()
-    try:
-        value = int(raw)
-    except ValueError:
-        raise ConfigError(
-            f"{name} must be an integer between {minimum} and {maximum}, got {raw!r}"
-        ) from None
+    if not (raw.isascii() and raw.isdigit()):
+        raise ConfigError(f"{name} must be an integer between {minimum} and {maximum}, got {raw!r}")
+    value = int(raw)
     if not minimum <= value <= maximum:
         raise ConfigError(f"{name} must be between {minimum} and {maximum}, got {value}")
     return value
+
+
+def _absolute_path(name: str, raw: str) -> Path:
+    path = Path(raw).expanduser()
+    if not path.is_absolute():
+        raise ConfigError(f"{name} must be an absolute path, got {raw!r}")
+    return path
 
 
 def _path(env: Mapping[str, str], name: str, default: Path) -> Path:
@@ -95,35 +116,44 @@ def _path(env: Mapping[str, str], name: str, default: Path) -> Path:
     raw = raw.strip()
     if not raw:
         raise ConfigError(f"{name} must not be empty")
-    return Path(raw).expanduser()
+    return _absolute_path(name, raw)
+
+
+def _optional_path(env: Mapping[str, str], name: str) -> Path | None:
+    raw = env.get(name)
+    if raw is None:
+        return None
+    raw = raw.strip()
+    if not raw:
+        raise ConfigError(f"{name} must not be empty")
+    return _absolute_path(name, raw)
 
 
 def _agent_token(env: Mapping[str, str]) -> str:
-    token = _optional_str(env, "SPARK_FLEET_AGENT_TOKEN")
-    if token is None:
-        raise ConfigError("SPARK_FLEET_AGENT_TOKEN is required")
+    token = _secret(env, "SPARK_FLEET_AGENT_TOKEN", required=True)
+    assert token is not None  # required=True raises instead of returning None
     if len(token) < MIN_TOKEN_LENGTH:
         raise ConfigError(f"SPARK_FLEET_AGENT_TOKEN must be at least {MIN_TOKEN_LENGTH} characters")
     return token
 
 
-def _log_level(env: Mapping[str, str]) -> str:
-    raw = _optional_str(env, "SPARK_FLEET_LOG_LEVEL")
+def _log_level(env: Mapping[str, str], name: str) -> str:
+    raw = env.get(name)
     if raw is None:
         return "INFO"
-    level = raw.upper()
+    level = raw.strip().upper()
+    if not level:
+        raise ConfigError(f"{name} must not be empty")
     if level not in LOG_LEVELS:
-        raise ConfigError(
-            f"SPARK_FLEET_LOG_LEVEL must be one of {', '.join(LOG_LEVELS)}, got {raw!r}"
-        )
+        raise ConfigError(f"{name} must be one of {', '.join(LOG_LEVELS)}, got {raw!r}")
     return level
 
 
 def _rollback_policy(env: Mapping[str, str]) -> str:
-    raw = _optional_str(env, "SPARK_FLEET_ROLLBACK_POLICY")
+    raw = env.get("SPARK_FLEET_ROLLBACK_POLICY")
     if raw is None:
         return "restore"
-    policy = raw.lower().replace("_", "-")
+    policy = raw.strip().lower().replace("_", "-")
     if policy not in ROLLBACK_POLICIES:
         raise ConfigError(
             f"SPARK_FLEET_ROLLBACK_POLICY must be one of "
@@ -141,7 +171,7 @@ def _model_cache_roots(env: Mapping[str, str]) -> tuple[Path, ...]:
         part = part.strip()
         if not part:
             continue
-        path = Path(part).expanduser()
+        path = _absolute_path("SPARK_FLEET_MODEL_CACHE_ROOTS", part)
         if path not in roots:
             roots.append(path)
     if not roots:
@@ -155,8 +185,8 @@ def load_controller_config(env: Mapping[str, str] | None = None) -> ControllerCo
     env = os.environ if env is None else env
 
     data_dir = _path(env, "SPARK_FLEET_DATA_DIR", DEFAULT_DATA_DIR)
-    ui_password = _optional_str(env, "SPARK_FLEET_UI_PASSWORD")
-    session_secret = _optional_str(env, "SPARK_FLEET_SESSION_SECRET")
+    ui_password = _secret(env, "SPARK_FLEET_UI_PASSWORD")
+    session_secret = _secret(env, "SPARK_FLEET_SESSION_SECRET")
 
     if ui_password is not None and session_secret is None:
         raise ConfigError(
@@ -185,7 +215,7 @@ def load_controller_config(env: Mapping[str, str] | None = None) -> ControllerCo
             env, "SPARK_FLEET_METRICS_SAMPLE_INTERVAL_SECONDS", 10, 1, 3600
         ),
         node_poll_interval_seconds=_int(env, "SPARK_FLEET_NODE_POLL_INTERVAL_SECONDS", 15, 1, 3600),
-        log_level=_log_level(env),
+        log_level=_log_level(env, "SPARK_FLEET_LOG_LEVEL"),
     )
 
 
@@ -204,10 +234,5 @@ def load_agent_config(env: Mapping[str, str] | None = None) -> AgentConfig:
         compose_projects_dir=_path(env, "SPARK_FLEET_COMPOSE_PROJECTS_DIR", data_dir / "projects"),
         model_cache_roots=_model_cache_roots(env),
         agent_token=_agent_token(env),
-        log_level=_log_level(env),
+        log_level=_log_level(env, "SPARK_FLEET_LOG_LEVEL"),
     )
-
-
-def _optional_path(env: Mapping[str, str], name: str) -> Path | None:
-    raw = _optional_str(env, name)
-    return Path(raw).expanduser() if raw is not None else None
