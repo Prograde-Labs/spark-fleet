@@ -281,6 +281,55 @@ async def test_cancel_then_stop_does_not_hang(db, bus):
     assert db.get_job(job_id)["status"] == "cancelled"
 
 
+async def test_cancel_wins_when_handler_swallows_cancellation(db, bus):
+    runner = JobRunner(db, bus, pool_size=1)
+    started = asyncio.Event()
+
+    async def handler(job):
+        started.set()
+        try:
+            await asyncio.sleep(30)
+        except asyncio.CancelledError:
+            return {"ignored": True}
+
+    runner.register("stubborn", handler)
+    await runner.start()
+
+    job_id = await runner.submit("stubborn")
+    await asyncio.wait_for(started.wait(), timeout=1)
+
+    assert await runner.cancel(job_id) is True
+    job = await wait_status(db, job_id, "cancelled")
+    assert job["error"] == "cancelled"
+    assert job["result"] is None
+
+    await asyncio.wait_for(runner.stop(), timeout=1)
+
+
+async def test_stop_wins_when_handler_swallows_cancellation(db, bus):
+    runner = JobRunner(db, bus, pool_size=1)
+    started = asyncio.Event()
+
+    async def handler(job):
+        started.set()
+        try:
+            await asyncio.sleep(30)
+        except asyncio.CancelledError:
+            return {"ignored": True}
+
+    runner.register("stubborn", handler)
+    await runner.start()
+
+    job_id = await runner.submit("stubborn")
+    await asyncio.wait_for(started.wait(), timeout=1)
+
+    await asyncio.wait_for(runner.stop(), timeout=1)
+
+    job = db.get_job(job_id)
+    assert job["status"] == "failed"
+    assert job["error"] == "runner stopped"
+
+
 async def test_cancel_terminal_job_returns_false(db, bus):
     runner = JobRunner(db, bus, pool_size=1)
 
@@ -305,8 +354,18 @@ async def test_start_recovers_interrupted_jobs(db, bus):
     db.create_job("done", "load")
     db.update_job("done", status="succeeded")
 
+    events = []
+
+    async def collect():
+        async for event in bus.subscribe():
+            events.append(event)
+
+    collector = asyncio.create_task(collect())
+    await asyncio.sleep(0)
+
     runner = JobRunner(db, bus, pool_size=1)
     await runner.start()
+    await asyncio.sleep(0)
     await runner.stop()
 
     for job_id in ("pending", "running"):
@@ -315,6 +374,17 @@ async def test_start_recovers_interrupted_jobs(db, bus):
         assert job["error"] == "interrupted by restart"
         assert db.list_job_events(job_id)[-1]["message"] == "failed"
     assert db.get_job("done")["status"] == "succeeded"
+
+    recovered = {
+        event.data["id"]
+        for event in events
+        if event.type == "job" and event.data["status"] == "failed"
+    }
+    assert recovered == {"pending", "running"}
+
+    collector.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await collector
 
 
 async def test_stop_marks_running_job_failed(db, bus):

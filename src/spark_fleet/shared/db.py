@@ -590,6 +590,20 @@ class Database:
             ).fetchall()
         return [self._job_row(row) for row in rows]
 
+    def list_jobs_by_status(self, statuses: Iterable[str]) -> list[dict[str, Any]]:
+        """Return every job in one of ``statuses``, oldest first, uncapped."""
+
+        statuses = sorted(set(statuses))
+        if not statuses:
+            return []
+        placeholders = ", ".join("?" for _ in statuses)
+        with self._lock:
+            rows = self._conn.execute(
+                f"SELECT * FROM jobs WHERE status IN ({placeholders}) ORDER BY created_at, id",
+                tuple(statuses),
+            ).fetchall()
+        return [self._job_row(row) for row in rows]
+
     @staticmethod
     def _job_row(row: sqlite3.Row) -> dict[str, Any]:
         data = dict(row)

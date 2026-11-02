@@ -87,11 +87,7 @@ class JobRunner:
     async def start(self) -> None:
         if self._started:
             return
-        interrupted = [
-            row
-            for row in self._db.list_jobs(limit=10_000)
-            if row["status"] in ("pending", "running")
-        ]
+        interrupted = self._db.list_jobs_by_status(("pending", "running"))
         self._db.mark_interrupted_jobs_failed()
         self._cancelled.clear()
         self._started = True
@@ -185,6 +181,8 @@ class JobRunner:
                     raise
             finally:
                 self._current.pop(job_id, None)
+            if self._stopping:
+                return
 
     async def _run(self, job_id: str, locks: Sequence[str]) -> None:
         row = self._db.get_job(job_id)
@@ -213,7 +211,12 @@ class JobRunner:
         except Exception as exc:
             await self._finish(job, "failed", error=str(exc))
         else:
-            await self._finish(job, "succeeded", result=result)
+            if job_id in self._cancelled:
+                await self._finish(job, "cancelled", error="cancelled")
+            elif self._stopping:
+                await self._finish(job, "failed", error="runner stopped")
+            else:
+                await self._finish(job, "succeeded", result=result)
 
     async def _finish(
         self,

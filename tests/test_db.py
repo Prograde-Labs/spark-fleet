@@ -284,6 +284,18 @@ def test_update_job_result(db):
     assert job["finished_at"] == 20.0
 
 
+def test_list_jobs_by_status_returns_all(db):
+    db.create_job("done", "load", status="succeeded")
+    db.create_job("pending", "load")
+    db.create_job("running", "load", status="running")
+
+    assert [job["id"] for job in db.list_jobs_by_status(("pending", "running"))] == [
+        "pending",
+        "running",
+    ]
+    assert db.list_jobs_by_status(()) == []
+
+
 def test_mark_interrupted_jobs_failed(db):
     db.create_job("pending-job", "load")
     db.create_job("running-job", "load")
