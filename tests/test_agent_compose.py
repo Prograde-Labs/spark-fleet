@@ -43,7 +43,7 @@ def compose_doc(labels=None):
                 if labels is not None
                 else {
                     LABEL_DEPLOYMENT: "demo-glm",
-                    LABEL_RECIPE: "demo-glm",
+                    LABEL_RECIPE: "demo-glm-recipe",
                     LABEL_ROLE: "head",
                     LABEL_CONFIG_HASH: "abc",
                 },
@@ -61,7 +61,7 @@ def container_row(**overrides):
         "Labels": ",".join(
             [
                 f"{LABEL_DEPLOYMENT}=demo-glm",
-                f"{LABEL_RECIPE}=demo-glm",
+                f"{LABEL_RECIPE}=demo-glm-recipe",
                 f"{LABEL_ROLE}=head",
                 f"{LABEL_CONFIG_HASH}=abc",
                 "com.docker.compose.project=spark-fleet-demo-glm-head",
@@ -216,7 +216,7 @@ def test_validate_project_writes_file_and_hashes_normalized_config(tmp_path, mon
     assert spec.project == PROJECT
     assert spec.directory == directory
     assert spec.deployment == "demo-glm"
-    assert spec.recipe == "demo-glm"
+    assert spec.recipe == "demo-glm-recipe"
     assert spec.role == "head"
     assert spec.config_hash == hashlib.sha256(b"normalized: true\n").hexdigest()
     written = (directory / COMPOSE_FILE_NAME).read_text()
@@ -267,7 +267,7 @@ def test_validate_project_requires_fleet_labels(tmp_path, monkeypatch):
     fake_config(monkeypatch)
     labels = {
         LABEL_DEPLOYMENT: "demo-glm",
-        LABEL_RECIPE: "demo-glm",
+        LABEL_RECIPE: "demo-glm-recipe",
         LABEL_ROLE: "head",
     }
 
@@ -312,7 +312,7 @@ def make_spec(tmp_path):
         project=PROJECT,
         directory=tmp_path,
         deployment="demo-glm",
-        recipe="demo-glm",
+        recipe="demo-glm-recipe",
         role="head",
         config_hash="abc",
     )
@@ -342,7 +342,7 @@ def test_up_project_verifies_labels(tmp_path, monkeypatch):
         status="Up 2 minutes",
         labels={
             LABEL_DEPLOYMENT: "demo-glm",
-            LABEL_RECIPE: "demo-glm",
+            LABEL_RECIPE: "demo-glm-recipe",
             LABEL_ROLE: "head",
             LABEL_CONFIG_HASH: "abc",
             "com.docker.compose.project": PROJECT,
@@ -374,13 +374,29 @@ def test_up_project_rejects_mismatched_deployment(tmp_path, monkeypatch):
         up_project(make_spec(tmp_path))
 
 
+def test_up_project_rejects_mismatched_recipe(tmp_path, monkeypatch):
+    monkeypatch.setattr("spark_fleet.agent.compose.docker_ops.compose_up", lambda *a, **k: None)
+    monkeypatch.setattr(
+        "spark_fleet.agent.compose.docker_ops.list_containers",
+        lambda *a, **k: [
+            container_row(
+                Labels=f"{LABEL_DEPLOYMENT}=demo-glm,{LABEL_RECIPE}=other-recipe,"
+                f"{LABEL_ROLE}=head,{LABEL_CONFIG_HASH}=abc"
+            )
+        ],
+    )
+
+    with pytest.raises(ComposeError, match=LABEL_RECIPE):
+        up_project(make_spec(tmp_path))
+
+
 def test_up_project_rejects_missing_role_label(tmp_path, monkeypatch):
     monkeypatch.setattr("spark_fleet.agent.compose.docker_ops.compose_up", lambda *a, **k: None)
     monkeypatch.setattr(
         "spark_fleet.agent.compose.docker_ops.list_containers",
         lambda *a, **k: [
             container_row(
-                Labels=f"{LABEL_DEPLOYMENT}=demo-glm,{LABEL_RECIPE}=demo-glm,"
+                Labels=f"{LABEL_DEPLOYMENT}=demo-glm,{LABEL_RECIPE}=demo-glm-recipe,"
                 f"{LABEL_CONFIG_HASH}=abc"
             )
         ],
