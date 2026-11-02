@@ -149,11 +149,35 @@ def test_container_logs_builds_command(monkeypatch):
     monkeypatch.setattr(
         docker_ops.subprocess,
         "run",
-        lambda args, **kwargs: calls.append(args) or completed(args, stdout="line\n"),
+        lambda args, **kwargs: calls.append((args, kwargs)) or completed(args, stdout="line\n"),
     )
 
     assert docker_ops.container_logs("abc", tail=50) == "line\n"
-    assert calls[0] == ["docker", "logs", "--tail", "50", "abc"]
+    assert calls[0][0] == ["docker", "logs", "--tail", "50", "abc"]
+    assert calls[0][1]["stdout"] is subprocess.PIPE
+    assert calls[0][1]["stderr"] is subprocess.STDOUT
+    assert calls[0][1]["text"] is True
+
+
+def test_container_stats_builds_command(monkeypatch):
+    calls = []
+    monkeypatch.setattr(
+        docker_ops.subprocess,
+        "run",
+        lambda args, **kwargs: calls.append(args) or completed(args, stdout=""),
+    )
+
+    docker_ops.container_stats(["abc", "def"])
+
+    assert calls[0] == [
+        "docker",
+        "stats",
+        "--no-stream",
+        "--format",
+        "{{json .}}",
+        "abc",
+        "def",
+    ]
 
 
 class FakeProcess:
@@ -269,6 +293,30 @@ def test_managed_containers_wraps_docker_errors(monkeypatch):
         managed_containers("demo-glm")
 
 
+def test_managed_containers_wraps_inspect_errors(monkeypatch):
+    patch_listing(monkeypatch)
+
+    def fail(*args, **kwargs):
+        raise docker_ops.DockerError("inspect failed")
+
+    monkeypatch.setattr("spark_fleet.agent.containers.docker_ops.inspect_containers", fail)
+
+    with pytest.raises(ContainerError, match="inspect failed"):
+        managed_containers("demo-glm")
+
+
+def test_managed_containers_wraps_stats_errors(monkeypatch):
+    patch_listing(monkeypatch)
+
+    def fail(*args, **kwargs):
+        raise docker_ops.DockerError("stats failed")
+
+    monkeypatch.setattr("spark_fleet.agent.containers.docker_ops.container_stats", fail)
+
+    with pytest.raises(ContainerError, match="stats failed"):
+        managed_containers("demo-glm")
+
+
 def test_managed_containers_reports_missing_health(monkeypatch):
     patch_listing(
         monkeypatch,
@@ -303,6 +351,8 @@ def test_managed_containers_reports_starting_health(monkeypatch):
         ("1kB", 1000),
         ("1.5MB", 1_500_000),
         ("8GiB", 8 * 1024**3),
+        ("1TB", 1000**4),
+        ("1TiB", 1024**4),
     ],
 )
 def test_parse_size(text, expected):
@@ -327,7 +377,39 @@ def test_container_logs_rejects_negative_tail():
         container_logs("abc", tail=-1)
 
 
+def test_container_logs_rejects_excessive_tail():
+    with pytest.raises(ContainerError, match="tail"):
+        container_logs("abc", tail=10_001)
+
+
+def test_container_logs_rejects_unmanaged_container(monkeypatch):
+    monkeypatch.setattr(
+        "spark_fleet.agent.containers.docker_ops.inspect_containers",
+        lambda ids, **kwargs: [
+            {"Id": ids[0], "Config": {"Labels": {"com.docker.compose.service": "hermes"}}}
+        ],
+    )
+
+    with pytest.raises(ContainerError, match="not managed"):
+        container_logs("abc")
+
+
+def test_container_logs_rejects_missing_container(monkeypatch):
+    monkeypatch.setattr(
+        "spark_fleet.agent.containers.docker_ops.inspect_containers",
+        lambda ids, **kwargs: [],
+    )
+
+    with pytest.raises(ContainerError, match="not found"):
+        container_logs("abc")
+
+
 def test_container_logs_wraps_docker_errors(monkeypatch):
+    monkeypatch.setattr(
+        "spark_fleet.agent.containers.docker_ops.inspect_containers",
+        lambda ids, **kwargs: [inspect_record()],
+    )
+
     def fail(*args, **kwargs):
         raise docker_ops.DockerError("logs failed")
 
@@ -338,6 +420,10 @@ def test_container_logs_wraps_docker_errors(monkeypatch):
 
 
 def test_container_logs_returns_output(monkeypatch):
+    monkeypatch.setattr(
+        "spark_fleet.agent.containers.docker_ops.inspect_containers",
+        lambda ids, **kwargs: [inspect_record()],
+    )
     monkeypatch.setattr(
         "spark_fleet.agent.containers.docker_ops.container_logs",
         lambda cid, **kwargs: "hello\n",
@@ -351,7 +437,21 @@ def test_follow_container_logs_validates_id():
         list(follow_container_logs("abc; rm -rf /"))
 
 
+def test_follow_container_logs_rejects_unmanaged_container(monkeypatch):
+    monkeypatch.setattr(
+        "spark_fleet.agent.containers.docker_ops.inspect_containers",
+        lambda ids, **kwargs: [{"Id": ids[0], "Config": {"Labels": {}}}],
+    )
+
+    with pytest.raises(ContainerError, match="not managed"):
+        list(follow_container_logs("abc"))
+
+
 def test_follow_container_logs_yields_lines(monkeypatch):
+    monkeypatch.setattr(
+        "spark_fleet.agent.containers.docker_ops.inspect_containers",
+        lambda ids, **kwargs: [inspect_record()],
+    )
     monkeypatch.setattr(
         "spark_fleet.agent.containers.docker_ops.follow_container_logs",
         lambda cid, **kwargs: iter(["one\n", "two\n"]),
@@ -361,6 +461,11 @@ def test_follow_container_logs_yields_lines(monkeypatch):
 
 
 def test_follow_container_logs_wraps_docker_errors(monkeypatch):
+    monkeypatch.setattr(
+        "spark_fleet.agent.containers.docker_ops.inspect_containers",
+        lambda ids, **kwargs: [inspect_record()],
+    )
+
     def fail(cid, **kwargs):
         raise docker_ops.DockerError("follow failed")
         yield  # pragma: no cover

@@ -127,8 +127,26 @@ def container_stats(ids: Sequence[str], *, timeout: float = 60.0) -> list[dict[s
 def container_logs(container_id: str, *, tail: int = 200, timeout: float = 60.0) -> str:
     """Return the last ``tail`` lines of a container's combined output."""
 
-    result = _run([DOCKER, "logs", "--tail", str(tail), container_id], timeout)
-    _require_success(result, f"docker logs for {container_id}")
+    try:
+        result = subprocess.run(
+            [DOCKER, "logs", "--tail", str(tail), container_id],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            check=False,
+            timeout=timeout,
+        )
+    except subprocess.TimeoutExpired as exc:
+        raise DockerError(
+            f"docker logs for {container_id} timed out after {timeout} seconds"
+        ) from exc
+    except OSError as exc:
+        raise DockerError(f"could not run docker logs for {container_id}: {exc}") from exc
+    if result.returncode:
+        detail = (result.stdout or "").strip()
+        raise DockerError(
+            f"docker logs for {container_id} failed: {detail or f'exit {result.returncode}'}"
+        )
     return result.stdout
 
 

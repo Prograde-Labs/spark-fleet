@@ -98,10 +98,11 @@ def managed_containers(
 
 
 def container_logs(container_id: str, *, tail: int = 200) -> str:
-    """Return the last ``tail`` lines of a container's combined output."""
+    """Return the last ``tail`` lines of a managed container's combined output."""
 
     _validate_container_id(container_id)
     _validate_tail(tail)
+    _require_managed(container_id)
     try:
         return docker_ops.container_logs(container_id, tail=tail)
     except docker_ops.DockerError as exc:
@@ -109,10 +110,11 @@ def container_logs(container_id: str, *, tail: int = 200) -> str:
 
 
 def follow_container_logs(container_id: str, *, tail: int = 200) -> Iterator[str]:
-    """Yield a container's log lines as they arrive until the stream closes."""
+    """Yield a managed container's log lines until the stream closes."""
 
     _validate_container_id(container_id)
     _validate_tail(tail)
+    _require_managed(container_id)
     try:
         yield from docker_ops.follow_container_logs(container_id, tail=tail)
     except docker_ops.DockerError as exc:
@@ -206,6 +208,23 @@ def _match(records: Mapping[str, Any], container_id: str) -> Mapping[str, Any] |
 def _validate_container_id(container_id: str) -> None:
     if not isinstance(container_id, str) or not CONTAINER_ID_PATTERN.fullmatch(container_id):
         raise ContainerError(f"invalid container id: {container_id!r}")
+
+
+def _require_managed(container_id: str) -> None:
+    try:
+        records = docker_ops.inspect_containers([container_id])
+    except docker_ops.DockerError as exc:
+        raise ContainerError(str(exc)) from exc
+    if not records:
+        raise ContainerError(f"container {container_id} not found")
+    config = records[0].get("Config")
+    labels = config.get("Labels") if isinstance(config, Mapping) else None
+    if (
+        not isinstance(labels, Mapping)
+        or not labels.get(LABEL_DEPLOYMENT)
+        or not labels.get(LABEL_ROLE)
+    ):
+        raise ContainerError(f"container {container_id} is not managed by spark-fleet")
 
 
 def _validate_tail(tail: int) -> None:
