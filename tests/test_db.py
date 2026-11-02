@@ -584,6 +584,36 @@ def test_directory_path_rejected(tmp_path):
         Database(tmp_path)
 
 
+def test_parent_that_is_a_file_rejected(tmp_path):
+    parent = tmp_path / "not-a-directory"
+    parent.write_text("x")
+
+    with pytest.raises(DatabaseError, match="open failed"):
+        Database(parent / "fleet.sqlite")
+
+
+def test_newer_legacy_database_is_not_mutated(tmp_path):
+    path = tmp_path / "fleet.sqlite"
+    connection = sqlite3.connect(path)
+    connection.execute("CREATE TABLE probe (x INTEGER)")
+    connection.execute("PRAGMA auto_vacuum = NONE")
+    connection.execute("VACUUM")
+    connection.execute("PRAGMA user_version = 99")
+    connection.commit()
+    connection.close()
+
+    with pytest.raises(DatabaseError, match="newer"):
+        Database(path)
+
+    connection = sqlite3.connect(path)
+    try:
+        mode = connection.execute("PRAGMA auto_vacuum").fetchone()[0]
+    finally:
+        connection.close()
+
+    assert mode == 0
+
+
 def test_legacy_database_converts_to_incremental_vacuum(tmp_path):
     path = tmp_path / "fleet.sqlite"
     database = Database(path)
@@ -606,7 +636,18 @@ def test_legacy_database_converts_to_incremental_vacuum(tmp_path):
 def test_split_statements_handles_semicolon_in_literal():
     script = "CREATE TABLE t (x TEXT DEFAULT ';');\nCREATE TABLE u (y INT);\n"
 
-    assert len(_split_statements(script)) == 2
+    statements = _split_statements(script)
+
+    assert statements == [
+        "CREATE TABLE t (x TEXT DEFAULT ';');",
+        "CREATE TABLE u (y INT);",
+    ]
+
+
+def test_split_statements_handles_multiple_statements_on_one_line():
+    script = "CREATE TABLE a(x); CREATE TABLE b(y);\n"
+
+    assert _split_statements(script) == ["CREATE TABLE a(x);", "CREATE TABLE b(y);"]
 
 
 def test_migration_rolls_back_on_failure(tmp_path):

@@ -185,15 +185,8 @@ class Database:
                 )
 
             if self.auto_vacuum_mode != 2:
-                try:
-                    self._conn.execute("PRAGMA auto_vacuum = INCREMENTAL")
-                    if version > 0:
-                        # Existing databases need a one-time rebuild for the
-                        # pragma to take effect.
-                        self._conn.execute("VACUUM")
-                except sqlite3.OperationalError:
-                    # Read-only databases cannot be rebuilt; leave the mode as is.
-                    pass
+                self._conn.execute("PRAGMA auto_vacuum = INCREMENTAL")
+                self._conn.execute("VACUUM")
 
             if self.path != ":memory:":
                 self._conn.execute("PRAGMA journal_mode = WAL")
