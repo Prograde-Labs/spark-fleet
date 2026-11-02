@@ -820,6 +820,14 @@ class Database:
             ).fetchone()
         return None if row is None else dict(row)
 
+    def list_metric_names(self, node_id: str) -> list[str]:
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT DISTINCT metric FROM node_metrics WHERE node_id = ? ORDER BY metric",
+                (node_id,),
+            ).fetchall()
+        return [row["metric"] for row in rows]
+
     def metric_series(
         self,
         node_id: str,
