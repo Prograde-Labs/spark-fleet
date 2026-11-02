@@ -269,6 +269,24 @@ def _expand_port_spec(spec: str, label: str) -> list[int]:
     return [_check_port(int(spec), label)]
 
 
+def _validate_container_spec(spec: str) -> None:
+    """Validate a container-side port or range without expanding it."""
+
+    if "-" in spec:
+        start, _, end = spec.partition("-")
+        if not (start.isascii() and start.isdigit() and end.isascii() and end.isdigit()):
+            raise ValueError(f"invalid container port range: {spec!r}")
+        low, high = int(start), int(end)
+        if low > high:
+            raise ValueError(f"invalid container port range: {spec!r}")
+        _check_port(low, "container")
+        _check_port(high, "container")
+        return
+    if not (spec.isascii() and spec.isdigit()):
+        raise ValueError(f"invalid container port: {spec!r}")
+    _check_port(int(spec), "container")
+
+
 def _published_ports(service: ServiceSpec) -> list[tuple[int, str]]:
     """Extract published host ports (and protocols) from Compose port syntax.
 
@@ -288,6 +306,18 @@ def _published_ports(service: ServiceSpec) -> list[tuple[int, str]]:
 
     for entry in service.ports:
         if isinstance(entry, dict):
+            target = entry.get("target")
+            if target is None:
+                raise ValueError("long-form port requires target")
+            if isinstance(target, bool):
+                raise ValueError("container port must not be a boolean")
+            if isinstance(target, int):
+                _check_port(target, "container")
+            elif isinstance(target, str):
+                _validate_container_spec(target)
+            else:
+                raise ValueError(f"invalid container port: {target!r}")
+
             published = entry.get("published")
             protocol = entry.get("protocol", "tcp")
             if not isinstance(protocol, str):
@@ -305,8 +335,13 @@ def _published_ports(service: ServiceSpec) -> list[tuple[int, str]]:
             elif published is not None:
                 raise ValueError(f"invalid published port: {published!r}")
             continue
-        if not isinstance(entry, str):
+        if isinstance(entry, bool):
+            raise ValueError("container port must not be a boolean")
+        if isinstance(entry, int):
+            _check_port(entry, "container")
             continue
+        if not isinstance(entry, str):
+            raise ValueError(f"invalid container port: {entry!r}")
 
         port_spec, slash, protocol = entry.partition("/")
         if slash and not protocol:
@@ -314,24 +349,26 @@ def _published_ports(service: ServiceSpec) -> list[tuple[int, str]]:
         protocol = protocol.lower() or "tcp"
         if protocol not in _PORT_PROTOCOLS:
             raise ValueError(f"invalid port protocol: {protocol!r}")
-        if port_spec.startswith("["):
+        bracketed = port_spec.startswith("[")
+        if bracketed:
             closing = port_spec.find("]:")
             if closing == -1:
                 raise ValueError(f"invalid published port: {entry!r}")
             port_spec = port_spec[closing + 2 :]
         parts = port_spec.split(":")
-        if len(parts) == 1:
-            _expand_port_spec(parts[0], "container")
-            continue
-        if len(parts) > 3:
+        max_parts = 2 if bracketed else 3
+        if len(parts) > max_parts:
             raise ValueError(f"invalid published port: {entry!r}")
+        if len(parts) == 1:
+            _validate_container_spec(parts[0])
+            continue
         if len(parts) == 2:
             host, container = parts
         else:
             _, host, container = parts
         if not container:
             raise ValueError(f"invalid published port: {entry!r}")
-        _expand_port_spec(container, "container")
+        _validate_container_spec(container)
         if not host:
             # Ephemeral host port (e.g. "127.0.0.1::8080").
             continue

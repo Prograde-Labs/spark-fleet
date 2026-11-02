@@ -637,7 +637,14 @@ def test_published_port_shapes_are_claimed(port_entry):
         "9000:abc",
         "9000:",
         "[::1]9000:9000",
+        "[::1]:9000:9000:9001",
+        "[::1]:abc:9000:9000",
         "9000:9000/",
+        70000,
+        0,
+        -1,
+        {"target": 70000, "published": None},
+        {"published": 9000},
     ],
 )
 def test_invalid_published_ports_rejected(port_entry):
@@ -914,13 +921,28 @@ def test_same_protocol_across_roles_rejected():
 
 
 def test_long_form_udp_port_allowed():
-    data = copy.deepcopy(SERVICE)
+    data = copy.deepcopy(DEPLOYMENT)
+    for role in data["spec"]["roles"]:
+        role["class"] = "light"
+        role["node"] = "spark-01"
+        del role["inferencePort"]
     data["spec"]["roles"][0]["service"]["ports"] = [
         {"target": 53, "published": 53, "protocol": "udp"}
     ]
+    data["spec"]["roles"][1]["service"]["ports"] = ["53:53/tcp"]
 
     recipe = parse_recipe(data)
 
     assert recipe.spec.roles[0].service.ports == [
         {"target": 53, "published": 53, "protocol": "udp"}
     ]
+    assert recipe.spec.roles[1].service.ports == ["53:53/tcp"]
+
+
+def test_wide_container_port_range_allowed():
+    data = copy.deepcopy(SERVICE)
+    data["spec"]["roles"][0]["service"]["ports"] = ["8000-9500", "9000:8000-9500"]
+
+    recipe = parse_recipe(data)
+
+    assert recipe.spec.roles[0].service.ports == ["8000-9500", "9000:8000-9500"]
