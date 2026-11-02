@@ -87,9 +87,22 @@ class JobRunner:
     async def start(self) -> None:
         if self._started:
             return
+        interrupted = [
+            row
+            for row in self._db.list_jobs(limit=10_000)
+            if row["status"] in ("pending", "running")
+        ]
         self._db.mark_interrupted_jobs_failed()
+        self._cancelled.clear()
         self._started = True
         self._stopping = False
+        for row in interrupted:
+            self._db.append_job_event(row["id"], "failed", level="error", phase="failed")
+            await self._publish(
+                Job(row["id"], row["kind"], row["payload"], row["deployment_id"]),
+                "failed",
+                "interrupted by restart",
+            )
         self._workers = [
             asyncio.create_task(self._worker(), name=f"job-worker-{index}")
             for index in range(self._pool_size)
@@ -108,6 +121,9 @@ class JobRunner:
             raise RuntimeError("job runner is not running")
 
         job_id = job_id or uuid.uuid4().hex
+        if self._queue.full():
+            raise RuntimeError("job queue is full")
+
         self._db.create_job(job_id, kind, deployment_id=deployment_id, payload=payload)
         self._db.append_job_event(job_id, "queued", phase="queued")
         await self._publish(
@@ -115,7 +131,7 @@ class JobRunner:
             "pending",
             "queued",
         )
-        await self._queue.put((job_id, tuple(locks)))
+        self._queue.put_nowait((job_id, tuple(locks)))
         return job_id
 
     async def cancel(self, job_id: str) -> bool:
@@ -189,6 +205,8 @@ class JobRunner:
         except asyncio.CancelledError:
             if job_id in self._cancelled:
                 await self._finish(job, "cancelled", error="cancelled")
+                if self._stopping:
+                    raise
                 return
             await self._finish(job, "failed", error="runner stopped")
             raise
@@ -215,6 +233,7 @@ class JobRunner:
         level = "error" if status in ("failed", "cancelled") else "info"
         self._db.append_job_event(job.id, status, level=level, phase=status)
         await self._publish(job, status, status)
+        self._cancelled.discard(job.id)
 
     async def _publish(self, job: Job, status: str, message: str) -> None:
         if self._bus is None:

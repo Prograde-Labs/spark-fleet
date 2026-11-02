@@ -238,9 +238,14 @@ async def test_cancel_queued_job(db, bus):
 
 async def test_cancel_running_job(db, bus):
     runner = JobRunner(db, bus, pool_size=1)
+    interrupted = asyncio.Event()
 
     async def handler(job):
-        await asyncio.sleep(30)
+        try:
+            await asyncio.sleep(30)
+        except asyncio.CancelledError:
+            interrupted.set()
+            raise
 
     runner.register("sleep", handler)
     await runner.start()
@@ -249,10 +254,31 @@ async def test_cancel_running_job(db, bus):
     await wait_status(db, job_id, "running")
 
     assert await runner.cancel(job_id) is True
+    await asyncio.wait_for(interrupted.wait(), timeout=1)
     job = await wait_status(db, job_id, "cancelled")
     assert job["error"] == "cancelled"
 
     await runner.stop()
+
+
+async def test_cancel_then_stop_does_not_hang(db, bus):
+    runner = JobRunner(db, bus, pool_size=1)
+    started = asyncio.Event()
+
+    async def handler(job):
+        started.set()
+        await asyncio.sleep(30)
+
+    runner.register("sleep", handler)
+    await runner.start()
+
+    job_id = await runner.submit("sleep")
+    await asyncio.wait_for(started.wait(), timeout=1)
+
+    assert await runner.cancel(job_id) is True
+    await asyncio.wait_for(runner.stop(), timeout=1)
+
+    assert db.get_job(job_id)["status"] == "cancelled"
 
 
 async def test_cancel_terminal_job_returns_false(db, bus):
@@ -287,16 +313,22 @@ async def test_start_recovers_interrupted_jobs(db, bus):
         job = db.get_job(job_id)
         assert job["status"] == "failed"
         assert job["error"] == "interrupted by restart"
+        assert db.list_job_events(job_id)[-1]["message"] == "failed"
     assert db.get_job("done")["status"] == "succeeded"
 
 
 async def test_stop_marks_running_job_failed(db, bus):
     runner = JobRunner(db, bus, pool_size=1)
     started = asyncio.Event()
+    interrupted = asyncio.Event()
 
     async def handler(job):
         started.set()
-        await asyncio.sleep(30)
+        try:
+            await asyncio.sleep(30)
+        except asyncio.CancelledError:
+            interrupted.set()
+            raise
 
     runner.register("sleep", handler)
     await runner.start()
@@ -306,12 +338,36 @@ async def test_stop_marks_running_job_failed(db, bus):
 
     await runner.stop()
 
+    assert interrupted.is_set()
     job = db.get_job(job_id)
     assert job["status"] == "failed"
     assert job["error"] == "runner stopped"
 
 
-async def test_submit_after_stop_rejected(db, bus):
+async def test_submit_rejects_when_queue_full(db, bus):
+    runner = JobRunner(db, bus, pool_size=1, queue_size=1)
+    started = asyncio.Event()
+    release = asyncio.Event()
+
+    async def handler(job):
+        started.set()
+        await release.wait()
+
+    runner.register("wait", handler)
+    await runner.start()
+
+    first = await runner.submit("wait")
+    await asyncio.wait_for(started.wait(), timeout=1)
+    second = await runner.submit("wait")
+
+    with pytest.raises(RuntimeError, match="queue is full"):
+        await runner.submit("wait")
+
+    release.set()
+    await wait_status(db, first, "succeeded")
+    await wait_status(db, second, "succeeded")
+
+    await runner.stop()
     runner = JobRunner(db, bus, pool_size=1)
     await runner.start()
     await runner.stop()
