@@ -4,6 +4,16 @@ Placeholders use ``{{ ... }}`` (not ``${...}``) so Compose interpolation is
 untouched. Rendering resolves them, merges the structured service fields with
 the preserved raw Compose keys, injects fleet labels and a deterministic
 container name, and returns a stable config hash per role.
+
+The returned ``config_hash`` is the SHA-256 of the rendered document *before*
+the ``spark.fleet.config-hash`` label is added, so the hash label can carry its
+own value without a circular dependency. The agent's ``/compose/validate`` pass
+returns the authoritative hash of the Compose-normalized document; the
+controller stores that hash per role and uses it for stale detection.
+
+Node ranks apply to heavy roles only: light helper roles are not part of the
+distributed topology and do not receive ``topology.nodeRank``. Ranks default to
+declaration order among heavy roles and must be unique and contiguous from 0.
 """
 
 from __future__ import annotations
@@ -24,8 +34,6 @@ LABEL_DEPLOYMENT = "spark.fleet.deployment"
 LABEL_RECIPE = "spark.fleet.recipe"
 LABEL_ROLE = "spark.fleet.role"
 LABEL_CONFIG_HASH = "spark.fleet.config-hash"
-
-_EMPTY_COLLECTION_KEYS = ("environment", "volumes", "ports", "devices", "cap_add")
 
 
 class RenderError(ValueError):
@@ -68,14 +76,29 @@ def render_deployment(
     ]
 
 
-def _resolve_ranks(recipe: Recipe, node_ranks: Mapping[str, int] | None) -> dict[str, int]:
-    if node_ranks is None:
-        return {role.name: index for index, role in enumerate(recipe.spec.roles)}
+def _heavy_roles(recipe: Recipe) -> list[RoleSpec]:
+    return [role for role in recipe.spec.roles if role.class_ == "heavy"]
 
-    missing = [role.name for role in recipe.spec.roles if role.name not in node_ranks]
-    if missing:
-        raise RenderError(f"node ranks missing for roles: {', '.join(missing)}")
-    return {role.name: int(node_ranks[role.name]) for role in recipe.spec.roles}
+
+def _resolve_ranks(recipe: Recipe, node_ranks: Mapping[str, int] | None) -> dict[str, int]:
+    heavy = _heavy_roles(recipe)
+    if node_ranks is None:
+        return {role.name: index for index, role in enumerate(heavy)}
+
+    ranks: dict[str, int] = {}
+    for role in heavy:
+        if role.name not in node_ranks:
+            raise RenderError(f"node ranks missing for role {role.name}")
+        value = node_ranks[role.name]
+        if isinstance(value, bool) or not isinstance(value, int):
+            raise RenderError(f"node rank for role {role.name} must be an integer")
+        if value < 0:
+            raise RenderError(f"node rank for role {role.name} must not be negative")
+        ranks[role.name] = value
+
+    if set(ranks.values()) != set(range(len(heavy))):
+        raise RenderError("node ranks must be unique and contiguous from 0")
+    return ranks
 
 
 def _base_context(
@@ -84,11 +107,12 @@ def _base_context(
     deployment_id: str,
     nodes: Mapping[str, NodeAddress],
 ) -> dict[str, str]:
+    heavy = _heavy_roles(recipe)
     context: dict[str, str] = {
         "deployment.name": deployment_name,
         "deployment.id": deployment_id,
         "topology.masterPort": str(recipe.spec.topology.master_port),
-        "topology.worldSize": str(len(recipe.spec.roles)),
+        "topology.worldSize": str(len(heavy)),
     }
 
     for node_id, address in nodes.items():
@@ -126,24 +150,31 @@ def _render_role(
 ) -> RenderedRole:
     context = _base_context(recipe, deployment_name, deployment_id, nodes)
 
-    rank_zero = next((item for item in recipe.spec.roles if ranks[item.name] == 0), None)
-    if rank_zero is None:
-        raise RenderError("no role has nodeRank 0")
-    master_address = nodes.get(rank_zero.node)
-    if master_address is None:
-        raise RenderError(f"unknown node {rank_zero.node!r} for rank-zero role")
-    context["topology.masterAddr"] = master_address.fabric_ip
-    context["topology.nodeRank"] = str(ranks[role.name])
+    heavy = _heavy_roles(recipe)
+    if heavy:
+        rank_zero = next(item for item in heavy if ranks[item.name] == 0)
+        master_address = nodes.get(rank_zero.node)
+        if master_address is None:
+            raise RenderError(f"unknown node {rank_zero.node!r} for rank-zero role")
+        context["topology.masterAddr"] = master_address.fabric_ip
+    if role.name in ranks:
+        context["topology.nodeRank"] = str(ranks[role.name])
 
-    service = role.service.model_dump(exclude_none=True)
-    for key in _EMPTY_COLLECTION_KEYS:
-        if key in service and not service[key]:
-            del service[key]
+    service = role.service.model_dump(exclude_unset=True)
+    service = {
+        key: value
+        for key, value in service.items()
+        if not (isinstance(value, (dict, list)) and not value)
+    }
 
     user_labels = _normalize_labels(role.service.labels)
     service.pop("labels", None)
-    service = _resolve_value(service, context)
-    user_labels = _resolve_value(user_labels, context)
+
+    try:
+        service = _resolve_value(service, context)
+        user_labels = _resolve_value(user_labels, context)
+    except RenderError as exc:
+        raise RenderError(f"role {role.name}: {exc}") from exc
 
     container_name = f"spark-fleet-{deployment_name}-{role.name}"
     user_labels.update(
@@ -194,6 +225,8 @@ def _resolve_value(value: Any, context: Mapping[str, str]) -> Any:
 
 
 def _resolve_placeholder(key: str, context: Mapping[str, str]) -> str:
+    if not key:
+        raise RenderError("empty placeholder")
     try:
         return context[key]
     except KeyError:
@@ -201,5 +234,8 @@ def _resolve_placeholder(key: str, context: Mapping[str, str]) -> str:
 
 
 def _config_hash(compose: Mapping[str, Any]) -> str:
-    payload = json.dumps(compose, sort_keys=True, separators=(",", ":"), default=str)
+    try:
+        payload = json.dumps(compose, sort_keys=True, separators=(",", ":"))
+    except TypeError as exc:
+        raise RenderError(f"compose document is not JSON-serializable: {exc}") from exc
     return hashlib.sha256(payload.encode()).hexdigest()

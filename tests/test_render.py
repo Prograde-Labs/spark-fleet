@@ -1,11 +1,21 @@
 """Tests for recipe rendering."""
 
 import copy
+import hashlib
+import json
+from datetime import date
 
 import pytest
 
 from spark_fleet.shared.recipe import parse_recipe
-from spark_fleet.shared.render import NodeAddress, RenderError, render_deployment
+from spark_fleet.shared.render import (
+    LABEL_CONFIG_HASH,
+    LABEL_DEPLOYMENT,
+    LABEL_RECIPE,
+    NodeAddress,
+    RenderError,
+    render_deployment,
+)
 
 NODES = {
     "spark-01": NodeAddress(lan_ip="192.0.2.239", fabric_ip="198.51.100.10"),
@@ -41,6 +51,7 @@ DEPLOYMENT = {
                         "WORLD_SIZE": "{{ topology.worldSize }}",
                         "TP": "{{ topology.tensorParallelSize }}",
                         "PEER": "{{ role.worker.node.fabricIp }}",
+                        "ROLE_LAN": "{{ role.worker.node.lanIp }}",
                         "LAN": "{{ node.spark-02.lanIp }}",
                         "MODEL": "{{ model.repo }}",
                         "SERVED": "{{ model.servedName }}",
@@ -49,7 +60,11 @@ DEPLOYMENT = {
                     },
                     "command": ["vllm", "serve", "{{ model.repo }}", "--port", "8888"],
                     "volumes": ["{{ deployment.name }}-cache:/cache"],
-                    "labels": {"owner": "chris", "spark.fleet.role": "override"},
+                    "labels": {
+                        "owner": "chris",
+                        "tier": "{{ deployment.name }}",
+                        "spark.fleet.role": "override",
+                    },
                 },
             },
             {
@@ -125,6 +140,7 @@ def test_resolves_placeholders():
     assert head["WORLD_SIZE"] == "2"
     assert head["TP"] == "2"
     assert head["PEER"] == "198.51.100.11"
+    assert head["ROLE_LAN"] == "192.0.2.79"
     assert head["LAN"] == "192.0.2.79"
     assert head["MODEL"] == "org/model"
     assert head["SERVED"] == "Demo-Model-B"
@@ -225,6 +241,11 @@ def test_empty_collections_are_omitted():
     for key in ("ports", "volumes", "devices", "cap_add"):
         assert key not in worker
 
+    service_workload = render(parse_recipe(SERVICE), name="hermes")[0].compose["services"][
+        "workload"
+    ]
+    assert "environment" not in service_workload
+
 
 def test_service_mode_renders_single_role():
     rendered = render(parse_recipe(SERVICE), name="hermes")
@@ -288,6 +309,137 @@ def test_missing_model_revision_raises():
 def test_invalid_deployment_name_rejected():
     with pytest.raises(RenderError, match="deployment name"):
         render(name="Bad Name")
+
+
+def test_empty_deployment_id_rejected():
+    with pytest.raises(RenderError, match="deployment id"):
+        render(deployment_id="")
+
+
+def test_resolves_placeholders_in_labels():
+    labels = render()[0].compose["services"]["workload"]["labels"]
+
+    assert labels["tier"] == "demo-glm"
+
+
+def test_resolves_nested_placeholders():
+    data = copy.deepcopy(DEPLOYMENT)
+    data["spec"]["roles"][0]["service"]["x-nested"] = {
+        "a": ["{{ deployment.name }}"],
+        "b": {"c": "{{ model.repo }}"},
+    }
+
+    workload = render(parse_recipe(data))[0].compose["services"]["workload"]
+
+    assert workload["x-nested"] == {
+        "a": ["demo-glm"],
+        "b": {"c": "org/model"},
+    }
+
+
+def test_recipe_label_is_distinct_from_deployment_name():
+    rendered = render(name="other-deploy")[0]
+    labels = rendered.compose["services"]["workload"]["labels"]
+
+    assert labels[LABEL_RECIPE] == "demo-glm"
+    assert labels[LABEL_DEPLOYMENT] == "other-deploy"
+    assert rendered.container_name == "spark-fleet-other-deploy-head"
+
+
+def test_explicit_null_extra_key_is_preserved():
+    data = copy.deepcopy(DEPLOYMENT)
+    data["spec"]["roles"][0]["service"]["x-flag"] = None
+
+    workload = render(parse_recipe(data))[0].compose["services"]["workload"]
+
+    assert "x-flag" in workload
+    assert workload["x-flag"] is None
+
+
+def test_empty_raw_collection_is_omitted():
+    data = copy.deepcopy(DEPLOYMENT)
+    data["spec"]["roles"][0]["service"]["extra_hosts"] = []
+
+    workload = render(parse_recipe(data))[0].compose["services"]["workload"]
+
+    assert "extra_hosts" not in workload
+
+
+def test_non_json_serializable_extra_rejected():
+    data = copy.deepcopy(DEPLOYMENT)
+    data["spec"]["roles"][0]["service"]["x-date"] = date(2026, 1, 1)
+
+    with pytest.raises(RenderError, match="JSON"):
+        render(parse_recipe(data))
+
+
+def test_hash_matches_document_without_hash_label():
+    rendered = render()[0]
+    workload = copy.deepcopy(rendered.compose["services"]["workload"])
+    del workload["labels"][LABEL_CONFIG_HASH]
+
+    payload = json.dumps(
+        {"services": {"workload": workload}}, sort_keys=True, separators=(",", ":")
+    )
+
+    assert hashlib.sha256(payload.encode()).hexdigest() == rendered.config_hash
+
+
+def test_light_helper_role_does_not_take_a_rank():
+    data = copy.deepcopy(DEPLOYMENT)
+    helper = {
+        "name": "helper",
+        "node": "spark-01",
+        "class": "light",
+        "startOrder": 5,
+        "service": {
+            "image": "alpine:latest",
+            "network_mode": "host",
+            "command": ["sleep", "infinity"],
+        },
+    }
+    data["spec"]["roles"].insert(0, helper)
+
+    rendered = render(parse_recipe(data))
+
+    assert [item.role for item in rendered] == ["helper", "head", "worker"]
+    head = rendered[1].compose["services"]["workload"]["environment"]
+    assert head["NODE_RANK"] == "0"
+    assert head["WORLD_SIZE"] == "2"
+    assert head["MASTER"] == "198.51.100.10"
+    assert "environment" not in rendered[0].compose["services"]["workload"]
+
+
+@pytest.mark.parametrize(
+    "ranks",
+    [
+        {"head": 0, "worker": 0},
+        {"head": 0, "worker": -1},
+        {"head": 0, "worker": "1"},
+        {"head": 0, "worker": 1.5},
+        {"head": 0, "worker": True},
+        {"head": 0},
+    ],
+)
+def test_invalid_node_ranks_rejected(ranks):
+    with pytest.raises(RenderError):
+        render(ranks=ranks)
+
+
+def test_unknown_placeholder_names_the_role():
+    data = copy.deepcopy(DEPLOYMENT)
+    data["spec"]["roles"][1]["service"]["environment"]["BAD"] = "{{ node.nope.fabricIp }}"
+
+    with pytest.raises(RenderError, match="role worker"):
+        render(parse_recipe(data))
+
+
+def test_empty_placeholder_rejected():
+    data = copy.deepcopy(DEPLOYMENT)
+    data["spec"]["roles"][0]["service"]["environment"]["BAD"] = "{{ }}"
+
+    with pytest.raises(RenderError, match="empty placeholder"):
+        render(parse_recipe(data))
 
 
 def test_render_error_is_value_error():
