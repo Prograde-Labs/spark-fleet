@@ -1,0 +1,350 @@
+"""Tests for the SQLite state store."""
+
+import sqlite3
+
+import pytest
+
+from spark_fleet.shared.db import SCHEMA_VERSION, Database, DatabaseError
+
+
+@pytest.fixture
+def db(tmp_path):
+    database = Database(tmp_path / "fleet.sqlite")
+    yield database
+    database.close()
+
+
+def add_node(db, node_id="spark-01"):
+    db.upsert_node(
+        node_id,
+        display_name=f"Spark {node_id}",
+        lan_ip="192.0.2.239",
+        fabric_ip="198.51.100.10",
+        agent_url=f"http://{node_id}:8092",
+        info={"gpu": "gb10"},
+    )
+
+
+def test_schema_version(db):
+    assert db.schema_version == SCHEMA_VERSION == 1
+
+
+def test_creates_parent_directory(tmp_path):
+    path = tmp_path / "nested" / "dir" / "fleet.sqlite"
+    database = Database(path)
+    try:
+        assert path.exists()
+    finally:
+        database.close()
+
+
+def test_node_upsert_and_get(db):
+    add_node(db)
+    node = db.get_node("spark-01")
+
+    assert node["id"] == "spark-01"
+    assert node["display_name"] == "Spark spark-01"
+    assert node["lan_ip"] == "192.0.2.239"
+    assert node["fabric_ip"] == "198.51.100.10"
+    assert node["agent_url"] == "http://spark-01:8092"
+    assert node["enabled"] is True
+    assert node["info"] == {"gpu": "gb10"}
+
+
+def test_node_upsert_preserves_created_at_and_info(db):
+    add_node(db)
+    created_at = db.get_node("spark-01")["created_at"]
+
+    db.upsert_node(
+        "spark-01",
+        display_name="Renamed",
+        lan_ip="192.0.2.240",
+        fabric_ip="198.51.100.12",
+        agent_url="http://spark-01:8092",
+        enabled=False,
+    )
+    node = db.get_node("spark-01")
+
+    assert node["display_name"] == "Renamed"
+    assert node["enabled"] is False
+    assert node["created_at"] == created_at
+    assert node["info"] == {"gpu": "gb10"}
+
+
+def test_touch_node(db):
+    add_node(db)
+    assert db.get_node("spark-01")["last_seen_at"] is None
+
+    db.touch_node("spark-01", now=123.0)
+
+    assert db.get_node("spark-01")["last_seen_at"] == 123.0
+
+
+def test_list_and_delete_nodes(db):
+    add_node(db, "spark-01")
+    add_node(db, "spark-02")
+
+    assert [node["id"] for node in db.list_nodes()] == ["spark-01", "spark-02"]
+
+    db.delete_node("spark-01")
+
+    assert db.get_node("spark-01") is None
+    assert [node["id"] for node in db.list_nodes()] == ["spark-02"]
+
+
+def test_deployment_create_get_and_json(db):
+    db.create_deployment(
+        "dep-1",
+        name="demo-glm",
+        recipe_name="demo-glm",
+        mode="deployment",
+        recipe={"apiVersion": "spark-fleet/v1"},
+        status="loading",
+    )
+
+    deployment = db.get_deployment("dep-1")
+
+    assert deployment["name"] == "demo-glm"
+    assert deployment["mode"] == "deployment"
+    assert deployment["status"] == "loading"
+    assert deployment["is_primary"] is False
+    assert deployment["recipe"] == {"apiVersion": "spark-fleet/v1"}
+    assert db.get_deployment_by_name("demo-glm")["id"] == "dep-1"
+
+
+def test_deployment_update(db):
+    db.create_deployment("dep-1", "demo-glm", "demo-glm", "deployment", {})
+
+    db.update_deployment("dep-1", status="loaded", loaded_at=10.0)
+
+    deployment = db.get_deployment("dep-1")
+    assert deployment["status"] == "loaded"
+    assert deployment["loaded_at"] == 10.0
+
+
+def test_set_primary_is_exclusive(db):
+    db.create_deployment("dep-1", "one", "one", "deployment", {})
+    db.create_deployment("dep-2", "two", "two", "deployment", {})
+
+    db.set_primary("dep-1")
+    assert db.get_deployment("dep-1")["is_primary"] is True
+    assert db.get_deployment("dep-2")["is_primary"] is False
+
+    db.set_primary("dep-2")
+    assert db.get_deployment("dep-1")["is_primary"] is False
+    assert db.get_deployment("dep-2")["is_primary"] is True
+
+
+def test_set_primary_unknown_deployment_raises(db):
+    with pytest.raises(KeyError):
+        db.set_primary("missing")
+
+
+def test_deployment_name_is_unique(db):
+    db.create_deployment("dep-1", "same", "same", "deployment", {})
+
+    with pytest.raises(sqlite3.IntegrityError):
+        db.create_deployment("dep-2", "same", "same", "deployment", {})
+
+
+def test_roles_upsert_and_list(db):
+    add_node(db)
+    db.create_deployment("dep-1", "demo-glm", "demo-glm", "deployment", {})
+
+    db.upsert_role("dep-1", "worker", "spark-01", "heavy", 10)
+    db.upsert_role("dep-1", "head", "spark-01", "heavy", 20, config_hash="abc")
+
+    roles = db.list_roles("dep-1")
+    assert [role["role_name"] for role in roles] == ["worker", "head"]
+
+    db.upsert_role(
+        "dep-1",
+        "head",
+        "spark-01",
+        "heavy",
+        20,
+        status="running",
+        config_hash="abc",
+        container_id="container-1",
+    )
+    head = db.list_roles("dep-1")[1]
+    assert head["status"] == "running"
+    assert head["container_id"] == "container-1"
+
+
+def test_role_requires_known_node(db):
+    db.create_deployment("dep-1", "demo-glm", "demo-glm", "deployment", {})
+
+    with pytest.raises(sqlite3.IntegrityError):
+        db.upsert_role("dep-1", "head", "ghost", "heavy", 0)
+
+
+def test_delete_deployment_cascades_roles(db):
+    add_node(db)
+    db.create_deployment("dep-1", "demo-glm", "demo-glm", "deployment", {})
+    db.upsert_role("dep-1", "head", "spark-01", "heavy", 0)
+
+    db.delete_deployment("dep-1")
+
+    assert db.get_deployment("dep-1") is None
+    assert db.list_roles("dep-1") == []
+
+
+def test_jobs_and_events(db):
+    db.create_job("job-1", "load", deployment_id="dep-1", payload={"recipe": "demo-glm"})
+
+    job = db.get_job("job-1")
+    assert job["kind"] == "load"
+    assert job["status"] == "pending"
+    assert job["payload"] == {"recipe": "demo-glm"}
+
+    db.update_job("job-1", status="running", started_at=10.0)
+    first_id = db.append_job_event("job-1", "started", phase="starting", ts=10.0)
+    second_id = db.append_job_event("job-1", "worker ready", ts=11.0)
+
+    events = db.list_job_events("job-1")
+    assert [event["message"] for event in events] == ["started", "worker ready"]
+    assert events[0]["phase"] == "starting"
+
+    later = db.list_job_events("job-1", after_id=first_id)
+    assert [event["id"] for event in later] == [second_id]
+
+
+def test_update_job_result(db):
+    db.create_job("job-1", "load")
+
+    db.update_job("job-1", status="succeeded", result={"loaded": True}, finished_at=20.0)
+
+    job = db.get_job("job-1")
+    assert job["status"] == "succeeded"
+    assert job["result"] == {"loaded": True}
+    assert job["finished_at"] == 20.0
+
+
+def test_mark_interrupted_jobs_failed(db):
+    db.create_job("pending-job", "load")
+    db.create_job("running-job", "load")
+    db.create_job("done-job", "load")
+    db.update_job("running-job", status="running")
+    db.update_job("done-job", status="succeeded")
+
+    count = db.mark_interrupted_jobs_failed(now=100.0)
+
+    assert count == 2
+    for job_id in ("pending-job", "running-job"):
+        job = db.get_job(job_id)
+        assert job["status"] == "failed"
+        assert job["error"] == "interrupted by restart"
+        assert job["finished_at"] == 100.0
+    assert db.get_job("done-job")["status"] == "succeeded"
+
+
+def test_metrics_latest_and_series(db):
+    add_node(db)
+    db.record_metric("spark-01", "mem_available", 100.0, ts=10.0)
+    db.record_metric("spark-01", "mem_available", 90.0, ts=20.0)
+    db.record_metrics([("spark-01", "mem_available", 80.0, 30.0)])
+
+    assert db.latest_metric("spark-01", "mem_available")["value"] == 80.0
+
+    series = db.metric_series("spark-01", "mem_available")
+    assert [sample["ts"] for sample in series] == [10.0, 20.0, 30.0]
+
+    window = db.metric_series("spark-01", "mem_available", since=15.0, until=25.0)
+    assert [sample["value"] for sample in window] == [90.0]
+
+
+def test_latest_metric_missing_returns_none(db):
+    add_node(db)
+
+    assert db.latest_metric("spark-01", "missing") is None
+
+
+def test_inference_samples(db):
+    db.record_inference_sample(
+        "dep-1",
+        requests=10,
+        errors=1,
+        latency_ms=20.0,
+        ttft_ms=5.0,
+        prompt_tokens=100,
+        completion_tokens=50,
+        ts=10.0,
+    )
+
+    samples = db.inference_series("dep-1")
+    assert len(samples) == 1
+    assert samples[0]["requests"] == 10
+    assert samples[0]["errors"] == 1
+    assert samples[0]["latency_ms"] == 20.0
+    assert samples[0]["prompt_tokens"] == 100
+    assert samples[0]["completion_tokens"] == 50
+
+
+def test_settings(db):
+    assert db.get_setting("missing") is None
+    assert db.get_setting("missing", "fallback") == "fallback"
+
+    db.set_setting("rollback_policy", "restore")
+    db.set_setting("rollback_policy", "leave-down")
+
+    assert db.get_setting("rollback_policy") == "leave-down"
+    assert db.list_settings() == {"rollback_policy": "leave-down"}
+
+    db.delete_setting("rollback_policy")
+    assert db.get_setting("rollback_policy") is None
+
+
+def test_prune_retention(db):
+    add_node(db)
+    db.record_metric("spark-01", "mem_available", 1.0, ts=10.0)
+    db.record_metric("spark-01", "mem_available", 2.0, ts=100.0)
+    db.record_inference_sample("dep-1", requests=1, ts=10.0)
+    db.record_inference_sample("dep-1", requests=2, ts=100.0)
+
+    counts = db.prune(retention_seconds=50, now=110.0)
+
+    assert counts == {"metrics": 1, "inference": 1}
+    assert [sample["ts"] for sample in db.metric_series("spark-01", "mem_available")] == [100.0]
+    assert [sample["ts"] for sample in db.inference_series("dep-1")] == [100.0]
+
+
+def test_incremental_vacuum_runs(db):
+    add_node(db)
+    db.record_metric("spark-01", "mem_available", 1.0, ts=10.0)
+
+    db.incremental_vacuum()
+
+    assert db.schema_version == SCHEMA_VERSION
+
+
+def test_reopen_preserves_data(db, tmp_path):
+    path = tmp_path / "fleet.sqlite"
+    add_node(db)
+    db.close()
+
+    reopened = Database(path)
+    try:
+        assert reopened.schema_version == SCHEMA_VERSION
+        assert reopened.get_node("spark-01")["display_name"] == "Spark spark-01"
+    finally:
+        reopened.close()
+
+
+def test_future_schema_version_rejected(tmp_path):
+    path = tmp_path / "fleet.sqlite"
+    database = Database(path)
+    database.close()
+
+    connection = sqlite3.connect(path)
+    connection.execute("PRAGMA user_version = 99")
+    connection.commit()
+    connection.close()
+
+    with pytest.raises(DatabaseError, match="newer"):
+        Database(path)
+
+
+def test_context_manager(tmp_path):
+    with Database(tmp_path / "fleet.sqlite") as database:
+        assert database.schema_version == SCHEMA_VERSION
