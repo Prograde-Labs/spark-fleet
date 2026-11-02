@@ -32,6 +32,10 @@ class SecurityError(Exception):
     """Base class for authentication and session failures."""
 
 
+class AuthError(SecurityError):
+    """Raised when UI login is disabled or credentials are invalid."""
+
+
 class SessionError(SecurityError):
     """Raised when a session token is malformed, forged, or expired."""
 
@@ -47,12 +51,19 @@ class Session:
     csrf: str
 
 
+def _compare(left: str, right: str | None) -> bool:
+    if not left or right is None or not right:
+        return False
+    try:
+        return hmac.compare_digest(left.encode(), right.encode())
+    except UnicodeEncodeError:
+        return False
+
+
 def verify_password(expected: str, provided: str | None) -> bool:
     """Compare a submitted password against the configured one."""
 
-    if provided is None:
-        return False
-    return hmac.compare_digest(expected.encode(), provided.encode())
+    return _compare(expected, provided)
 
 
 def parse_bearer(header: str | None) -> str | None:
@@ -76,9 +87,7 @@ def parse_bearer(header: str | None) -> str | None:
 def verify_token(expected: str, provided: str | None) -> bool:
     """Compare a presented agent token against the configured token."""
 
-    if provided is None:
-        return False
-    return hmac.compare_digest(expected.encode(), provided.encode())
+    return _compare(expected, provided)
 
 
 def _b64encode(data: bytes) -> str:
@@ -129,7 +138,8 @@ def verify_session(secret: str, token: str, *, now: float | None = None) -> Sess
         raise SessionError("invalid session token")
 
     expected = hmac.new(secret.encode(), encoded.encode(), hashlib.sha256).digest()
-    if not hmac.compare_digest(_b64encode(expected), signature):
+    provided = _b64decode(signature)
+    if not hmac.compare_digest(expected, provided):
         raise SessionError("invalid session signature")
 
     try:
@@ -167,6 +177,44 @@ def verify_csrf(session: Session, provided: str | None) -> None:
         raise CsrfError("missing CSRF token")
     if not hmac.compare_digest(session.csrf.encode(), provided.encode()):
         raise CsrfError("invalid CSRF token")
+
+
+def login_session(
+    ui_password: str | None,
+    session_secret: str | None,
+    provided: str | None,
+    *,
+    ttl_seconds: float = DEFAULT_SESSION_TTL_SECONDS,
+    now: float | None = None,
+) -> str:
+    """Verify a submitted UI password and issue a signed session token."""
+
+    if ui_password is None or session_secret is None:
+        raise AuthError("UI login is disabled")
+    if not verify_password(ui_password, provided):
+        raise AuthError("invalid credentials")
+    return create_session(session_secret, ttl_seconds=ttl_seconds, now=now)
+
+
+def session_cookie_settings(
+    ttl_seconds: float = DEFAULT_SESSION_TTL_SECONDS,
+) -> dict[str, object]:
+    """Keyword arguments for ``Response.set_cookie`` carrying the session.
+
+    ``secure`` is off because this release is LAN-only over plain HTTP; enable
+    it once TLS terminates in front of the controller.
+    """
+
+    if ttl_seconds <= 0:
+        raise ValueError("session ttl must be positive")
+    return {
+        "key": SESSION_COOKIE_NAME,
+        "httponly": True,
+        "samesite": "strict",
+        "path": "/",
+        "max_age": int(ttl_seconds),
+        "secure": False,
+    }
 
 
 def agent_auth_dependency(expected_token: str):

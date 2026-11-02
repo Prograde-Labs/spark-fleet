@@ -12,13 +12,16 @@ from fastapi.testclient import TestClient
 from spark_fleet.shared.security import (
     CSRF_HEADER_NAME,
     SESSION_COOKIE_NAME,
+    AuthError,
     CsrfError,
     Session,
     SessionError,
     agent_auth_dependency,
     create_session,
+    login_session,
     mutation_dependency,
     parse_bearer,
+    session_cookie_settings,
     ui_session_dependency,
     verify_csrf,
     verify_password,
@@ -42,6 +45,19 @@ def test_password_match_and_mismatch():
     assert verify_password("correct horse", "wrong") is False
     assert verify_password("correct horse", "") is False
     assert verify_password("correct horse", None) is False
+
+
+def test_empty_configured_password_never_authenticates():
+    assert verify_password("", "") is False
+    assert verify_password("", "anything") is False
+
+
+def test_password_with_lone_surrogate_fails_cleanly():
+    assert verify_password("correct horse", "\ud800") is False
+
+
+def test_token_with_lone_surrogate_fails_cleanly():
+    assert verify_token(TOKEN, "\ud800") is False
 
 
 def test_password_compare_is_constant_time():
@@ -94,11 +110,52 @@ def test_parse_bearer_rejects_malformed_headers(header):
     assert parse_bearer(header) is None
 
 
-def test_verify_token_uses_constant_time_compare():
+def test_verify_token_match_and_mismatch():
     assert verify_token(TOKEN, TOKEN) is True
     assert verify_token(TOKEN, TOKEN + "x") is False
     assert verify_token(TOKEN, None) is False
     assert verify_token(TOKEN, "") is False
+
+
+def test_verify_token_uses_constant_time_compare():
+    import spark_fleet.shared.security as security
+
+    calls = []
+
+    def fake_compare(left, right):
+        calls.append((left, right))
+        return left == right
+
+    original = security.hmac.compare_digest
+    security.hmac.compare_digest = fake_compare
+    try:
+        assert verify_token(TOKEN, TOKEN) is True
+    finally:
+        security.hmac.compare_digest = original
+
+    assert calls == [(TOKEN.encode(), TOKEN.encode())]
+
+
+def test_session_signature_uses_constant_time_compare():
+    import spark_fleet.shared.security as security
+
+    token = create_session(SECRET, now=1000.0)
+    calls = []
+
+    def fake_compare(left, right):
+        calls.append((left, right))
+        return left == right
+
+    original = security.hmac.compare_digest
+    security.hmac.compare_digest = fake_compare
+    try:
+        verify_session(SECRET, token, now=1000.0)
+    finally:
+        security.hmac.compare_digest = original
+
+    assert len(calls) == 1
+    assert calls[0][0] == calls[0][1]
+    assert len(calls[0][0]) == hashlib.sha256().digest_size
 
 
 def test_session_round_trip():
@@ -126,6 +183,13 @@ def test_session_expires():
 
     with pytest.raises(SessionError, match="expired"):
         verify_session(SECRET, token, now=1060.0)
+
+
+def test_session_rejects_far_future_issue_time():
+    token = create_session(SECRET, ttl_seconds=60, now=1000.0)
+
+    with pytest.raises(SessionError, match="issued_at"):
+        verify_session(SECRET, token, now=600.0)
 
 
 def test_session_rejects_tampered_payload():
@@ -179,6 +243,14 @@ def test_session_rejects_malformed_tokens(token):
         verify_session(SECRET, token)
 
 
+def test_session_rejects_non_ascii_signature_without_crashing():
+    token = create_session(SECRET, now=1000.0)
+    payload_b64, _ = token.split(".")
+
+    with pytest.raises(SessionError, match="invalid session token"):
+        verify_session(SECRET, f"{payload_b64}.é", now=1000.0)
+
+
 def test_session_rejects_invalid_payload_shape():
     for payload in (
         [],
@@ -195,6 +267,11 @@ def test_session_rejects_invalid_payload_shape():
 def test_session_requires_non_empty_secret():
     with pytest.raises(ValueError, match="secret"):
         create_session("")
+
+
+def test_verify_session_requires_non_empty_secret():
+    with pytest.raises(ValueError, match="secret"):
+        verify_session("", "a.b")
 
 
 def test_session_rejects_non_positive_ttl():
@@ -214,6 +291,55 @@ def test_verify_csrf_rejects_mismatch(provided):
 
     with pytest.raises(CsrfError):
         verify_csrf(session, provided)
+
+
+def test_login_session_issues_verifiable_session():
+    token = login_session("hunter2", SECRET, "hunter2", now=1000.0)
+
+    session = verify_session(SECRET, token, now=1000.0)
+
+    assert session.csrf
+    assert session.expires_at == 1000.0 + 12 * 3600
+
+
+def test_login_session_rejects_wrong_password():
+    with pytest.raises(AuthError, match="invalid credentials"):
+        login_session("hunter2", SECRET, "nope")
+
+
+def test_login_session_requires_configuration():
+    with pytest.raises(AuthError, match="disabled"):
+        login_session(None, SECRET, "anything")
+    with pytest.raises(AuthError, match="disabled"):
+        login_session("hunter2", None, "hunter2")
+
+
+def test_session_cookie_settings():
+    settings = session_cookie_settings(3600)
+
+    assert settings == {
+        "key": SESSION_COOKIE_NAME,
+        "httponly": True,
+        "samesite": "strict",
+        "path": "/",
+        "max_age": 3600,
+        "secure": False,
+    }
+
+    with pytest.raises(ValueError, match="ttl"):
+        session_cookie_settings(0)
+
+
+def test_agent_dependency_requires_non_empty_token():
+    with pytest.raises(ValueError, match="token"):
+        agent_auth_dependency("")
+
+
+def test_session_dependencies_require_non_empty_secret():
+    with pytest.raises(ValueError, match="secret"):
+        ui_session_dependency("")
+    with pytest.raises(ValueError, match="secret"):
+        mutation_dependency("")
 
 
 def test_agent_dependency_accepts_valid_token():
