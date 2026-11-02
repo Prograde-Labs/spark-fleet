@@ -1,6 +1,7 @@
 """Tests for the event bus and SSE formatting."""
 
 import asyncio
+from types import MappingProxyType
 
 import pytest
 
@@ -161,19 +162,31 @@ def test_event_rejects_non_json_data():
         Event("memory", {"when": object()})
 
 
+def test_event_normalizes_mapping_to_dict():
+    event = Event("memory", MappingProxyType({"a": 1}))
+
+    assert isinstance(event.data, dict)
+    assert format_sse(event) == 'event: memory\ndata: {"a":1}\n\n'
+
+
+def test_event_rejects_non_finite_numbers():
+    with pytest.raises(ValueError, match="JSON"):
+        Event("memory", {"nan": float("nan")})
+
+
 async def test_publish_after_close_is_ignored_with_subscriber():
-    bus = EventBus()
-
-    async def drain():
-        return [event async for event in bus.subscribe()]
-
-    task = asyncio.create_task(drain())
+    bus = EventBus(queue_size=1)
+    stream = bus.subscribe()
+    task = asyncio.create_task(anext(stream))
     await asyncio.sleep(0)
 
+    await bus.publish(Event("first", {}))
     await bus.close()
-    await bus.publish(Event("memory", {"node": "spark-01"}))
+    await bus.publish(Event("after-close", {}))
 
-    assert await task == []
+    with pytest.raises(StopAsyncIteration):
+        await asyncio.wait_for(task, timeout=1)
+    assert bus.dropped == 1
 
 
 async def test_close_is_idempotent_with_active_subscriber():

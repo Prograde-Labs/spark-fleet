@@ -34,10 +34,12 @@ class Event:
             raise ValueError(f"invalid event id: {self.id!r}")
         if not isinstance(self.data, Mapping):
             raise ValueError("event data must be a mapping")
+        data = dict(self.data)
         try:
-            json.dumps(dict(self.data), sort_keys=True, separators=(",", ":"))
+            json.dumps(data, sort_keys=True, separators=(",", ":"), allow_nan=False)
         except (TypeError, ValueError) as exc:
             raise ValueError(f"event data is not JSON-serializable: {exc}") from exc
+        object.__setattr__(self, "data", data)
 
 
 def format_sse(event: Event) -> str:
@@ -52,7 +54,8 @@ def format_sse(event: Event) -> str:
     if event.id is not None:
         lines.append(f"id: {event.id}")
     lines.append(f"event: {event.type}")
-    lines.append(f"data: {json.dumps(event.data, sort_keys=True, separators=(',', ':'))}")
+    payload = json.dumps(dict(event.data), sort_keys=True, separators=(",", ":"), allow_nan=False)
+    lines.append(f"data: {payload}")
     return "\n".join(lines) + "\n\n"
 
 
