@@ -191,6 +191,9 @@ class Database:
                     self._conn.execute("PRAGMA auto_vacuum = INCREMENTAL")
                     self._conn.execute("VACUUM")
                 except sqlite3.Error as exc:
+                    message = str(exc).lower()
+                    if "locked" in message or "busy" in message:
+                        raise DatabaseError(f"database conversion blocked: {exc}") from exc
                     raise DatabaseError(f"database conversion failed: {exc}") from exc
                 if self.auto_vacuum_mode != 2:
                     raise DatabaseError("database conversion did not enable incremental vacuum")

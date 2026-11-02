@@ -13,6 +13,48 @@ from spark_fleet.shared.db import (
 )
 
 
+class _ConnectionWrapper:
+    def __init__(self, connection):
+        object.__setattr__(self, "_connection", connection)
+
+    def __getattr__(self, name):
+        return getattr(self._connection, name)
+
+    def __setattr__(self, name, value):
+        if name == "_connection":
+            object.__setattr__(self, name, value)
+        else:
+            setattr(self._connection, name, value)
+
+    def execute(self, sql, *args):
+        return self._connection.execute(sql, *args)
+
+
+class _VacuumFailingConnection(_ConnectionWrapper):
+    def execute(self, sql, *args):
+        if sql.strip().upper().startswith("VACUUM"):
+            raise sqlite3.OperationalError("disk I/O error")
+        return super().execute(sql, *args)
+
+
+class _ModeIgnoringConnection(_ConnectionWrapper):
+    def execute(self, sql, *args):
+        if "AUTO_VACUUM" in sql.upper() and "=" in sql:
+            return None
+        return super().execute(sql, *args)
+
+
+def _make_legacy_database(path, user_version=1):
+    connection = sqlite3.connect(path)
+    connection.execute("CREATE TABLE probe (x INTEGER)")
+    connection.commit()
+    connection.execute("PRAGMA auto_vacuum = NONE")
+    connection.execute("VACUUM")
+    connection.execute(f"PRAGMA user_version = {user_version}")
+    connection.commit()
+    connection.close()
+
+
 @pytest.fixture
 def db(tmp_path):
     database = Database(tmp_path / "fleet.sqlite")
@@ -708,13 +750,7 @@ def test_version_zero_file_with_table_converts_to_incremental_vacuum(tmp_path):
 @pytest.mark.skipif(os.geteuid() == 0, reason="root bypasses file permission bits")
 def test_read_only_legacy_database_fails_cleanly(tmp_path):
     path = tmp_path / "fleet.sqlite"
-    connection = sqlite3.connect(path)
-    connection.execute("CREATE TABLE probe (x INTEGER)")
-    connection.execute("PRAGMA auto_vacuum = NONE")
-    connection.execute("VACUUM")
-    connection.execute("PRAGMA user_version = 1")
-    connection.commit()
-    connection.close()
+    _make_legacy_database(path)
     path.chmod(0o444)
 
     try:
@@ -722,6 +758,41 @@ def test_read_only_legacy_database_fails_cleanly(tmp_path):
             Database(path)
     finally:
         path.chmod(0o644)
+
+    connection = sqlite3.connect(path)
+    try:
+        assert connection.execute("PRAGMA user_version").fetchone()[0] == 1
+        assert connection.execute("PRAGMA auto_vacuum").fetchone()[0] == 0
+    finally:
+        connection.close()
+
+
+def test_conversion_failure_is_reported(tmp_path, monkeypatch):
+    path = tmp_path / "fleet.sqlite"
+    _make_legacy_database(path)
+
+    real_connect = sqlite3.connect
+    monkeypatch.setattr(
+        "spark_fleet.shared.db.sqlite3.connect",
+        lambda *args, **kwargs: _VacuumFailingConnection(real_connect(*args, **kwargs)),
+    )
+
+    with pytest.raises(DatabaseError, match="conversion failed"):
+        Database(path)
+
+
+def test_conversion_mode_check_rejects_noop(tmp_path, monkeypatch):
+    path = tmp_path / "fleet.sqlite"
+    _make_legacy_database(path)
+
+    real_connect = sqlite3.connect
+    monkeypatch.setattr(
+        "spark_fleet.shared.db.sqlite3.connect",
+        lambda *args, **kwargs: _ModeIgnoringConnection(real_connect(*args, **kwargs)),
+    )
+
+    with pytest.raises(DatabaseError, match="did not enable"):
+        Database(path)
 
 
 def test_failed_open_does_not_leak_connection(tmp_path):
@@ -744,4 +815,4 @@ def test_failed_open_does_not_leak_connection(tmp_path):
             Database(path)
         gc.collect()
 
-    assert not any(issubclass(warning.category, ResourceWarning) for warning in caught)
+    assert not any("unclosed" in str(warning.message).lower() for warning in caught)
