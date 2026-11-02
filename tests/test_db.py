@@ -798,8 +798,15 @@ def test_conversion_failure_is_reported(tmp_path, monkeypatch):
     try:
         assert connection.execute("PRAGMA user_version").fetchone()[0] == 1
         assert connection.execute("PRAGMA auto_vacuum").fetchone()[0] == 0
+        tables = {
+            row[0]
+            for row in connection.execute("SELECT name FROM sqlite_master WHERE type = 'table'")
+        }
     finally:
         connection.close()
+
+    assert "probe" in tables
+    assert "nodes" not in tables
 
 
 def test_conversion_blocked_is_reported(tmp_path, monkeypatch):
@@ -814,6 +821,31 @@ def test_conversion_blocked_is_reported(tmp_path, monkeypatch):
 
     with pytest.raises(DatabaseError, match="conversion blocked"):
         Database(path)
+
+    connection = sqlite3.connect(path)
+    try:
+        assert connection.execute("PRAGMA user_version").fetchone()[0] == 1
+        assert connection.execute("PRAGMA auto_vacuum").fetchone()[0] == 0
+        tables = {
+            row[0]
+            for row in connection.execute("SELECT name FROM sqlite_master WHERE type = 'table'")
+        }
+    finally:
+        connection.close()
+
+    assert "probe" in tables
+    assert "nodes" not in tables
+
+
+def test_connection_wrapper_supports_context_manager():
+    connection = sqlite3.connect(":memory:")
+    wrapper = _ConnectionWrapper(connection)
+    try:
+        with wrapper:
+            wrapper.execute("CREATE TABLE t (x INTEGER)")
+        assert wrapper.execute("SELECT name FROM sqlite_master").fetchone()[0] == "t"
+    finally:
+        wrapper.close()
 
 
 def test_conversion_mode_check_rejects_noop(tmp_path, monkeypatch):
