@@ -155,7 +155,7 @@ def test_session_signature_uses_constant_time_compare():
 
     assert len(calls) == 1
     assert calls[0][0] == calls[0][1]
-    assert len(calls[0][0]) == hashlib.sha256().digest_size
+    assert len(calls[0][0]) == 43  # base64url of a SHA-256 digest, unpadded
 
 
 def test_session_round_trip():
@@ -241,6 +241,15 @@ def test_session_rejects_wrong_secret():
 def test_session_rejects_malformed_tokens(token):
     with pytest.raises(SessionError):
         verify_session(SECRET, token)
+
+
+def test_session_rejects_non_canonical_signature():
+    token = create_session(SECRET, now=1000.0)
+    payload_b64, signature = token.split(".")
+
+    for suffix in ("!!!!", "=", "==", "A"):
+        with pytest.raises(SessionError, match="signature"):
+            verify_session(SECRET, f"{payload_b64}.{signature}{suffix}", now=1000.0)
 
 
 def test_session_rejects_non_ascii_signature_without_crashing():

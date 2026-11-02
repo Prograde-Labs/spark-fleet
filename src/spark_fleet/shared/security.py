@@ -138,8 +138,11 @@ def verify_session(secret: str, token: str, *, now: float | None = None) -> Sess
         raise SessionError("invalid session token")
 
     expected = hmac.new(secret.encode(), encoded.encode(), hashlib.sha256).digest()
-    provided = _b64decode(signature)
-    if not hmac.compare_digest(expected, provided):
+    try:
+        provided = signature.encode("ascii")
+    except UnicodeEncodeError as exc:
+        raise SessionError("invalid session token") from exc
+    if not hmac.compare_digest(_b64encode(expected).encode(), provided):
         raise SessionError("invalid session signature")
 
     try:
