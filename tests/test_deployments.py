@@ -110,6 +110,7 @@ class FakeAgent:
             "models": [{"repo": "org/model", "cached": True}],
         }
         self.prepare_status = {"state": "succeeded"}
+        self.composes = []
         self.closed = False
 
     async def models(self):
@@ -118,6 +119,7 @@ class FakeAgent:
 
     async def validate_compose(self, project, compose):
         self.calls.append(("validate", project))
+        self.composes.append((project, compose))
         if self.validate_error is not None:
             raise self.validate_error
         return {"project": project, "config_hash": f"hash-{project}"}
@@ -787,7 +789,8 @@ async def test_cancelled_load_stops_roles_and_clears_primary(db, registry, runne
         readiness_started.set()
         await asyncio.Event().wait()
 
-    manager = make_manager(db, registry, runner, agents_for(), readiness=blocking_readiness)
+    agents = agents_for()
+    manager = make_manager(db, registry, runner, agents, readiness=blocking_readiness)
 
     job_id = await manager.load("dep-1")
     await asyncio.wait_for(readiness_started.wait(), timeout=2)
@@ -802,6 +805,7 @@ async def test_cancelled_load_stops_roles_and_clears_primary(db, registry, runne
     roles = {role["role_name"]: role["status"] for role in db.list_roles("dep-1")}
     assert roles["worker"] == "stopped"
     assert roles["head"] == "stopped"
+    assert ("down", "spark-fleet-demo-glm-worker") in agents[NODE_02_URL].calls
 
 
 # unload and redeploy ------------------------------------------------------
@@ -886,7 +890,8 @@ async def test_redeploy_applies_changed_recipe(db, registry, runner):
     recipe_obj = create_deployment(db, status="loaded")
     add_roles(db, "dep-1", recipe_obj)
     changed = parse_recipe(recipe_dict(image="ghcr.io/org/other:tag"))
-    manager = make_manager(db, registry, runner, agents_for())
+    agents = agents_for()
+    manager = make_manager(db, registry, runner, agents)
 
     assert manager.is_stale("dep-1", changed) is True
 
@@ -895,6 +900,10 @@ async def test_redeploy_applies_changed_recipe(db, registry, runner):
     stored = db.get_deployment("dep-1")["recipe"]
     assert stored["spec"]["roles"][0]["service"]["image"] == "ghcr.io/org/other:tag"
     assert manager.is_stale("dep-1", changed) is False
+    assert any(
+        compose["services"]["workload"]["image"] == "ghcr.io/org/other:tag"
+        for _project, compose in agents[NODE_01_URL].composes
+    )
 
 
 async def test_redeploy_fails_when_stop_fails(db, registry, runner):
@@ -908,6 +917,55 @@ async def test_redeploy_fails_when_stop_fails(db, registry, runner):
 
     assert "down failed" in job["error"]
     assert not any(call[0] == "up" for call in agents[NODE_01_URL].calls)
+
+
+async def test_redeploy_model_failure_preserves_loaded_deployment(db, registry, runner):
+    recipe_obj = create_deployment(db, status="loaded")
+    add_roles(db, "dep-1", recipe_obj)
+    db.set_primary("dep-1")
+    agents = agents_for()
+    agents[NODE_01_URL].models_response = {"roots": [], "models": []}
+    manager = make_manager(db, registry, runner, agents)
+
+    job = await wait_job(db, await manager.redeploy("dep-1"), "failed")
+
+    assert "not cached" in job["error"]
+    deployment = db.get_deployment("dep-1")
+    assert deployment["status"] == "loaded"
+    assert deployment["is_primary"] is True
+    roles = {role["role_name"]: role["status"] for role in db.list_roles("dep-1")}
+    assert roles == {"worker": "running", "head": "running"}
+    assert not any(call[0] == "down" for call in agents[NODE_01_URL].calls)
+
+
+async def test_redeploy_changed_roles_stops_old_roles(db, registry, runner):
+    old_recipe = create_deployment(db, status="loaded")
+    add_roles(db, "dep-1", old_recipe)
+    changed = parse_recipe(
+        recipe_dict(
+            roles=[
+                {
+                    "name": "solo",
+                    "node": "spark-01",
+                    "class": "heavy",
+                    "startOrder": 10,
+                    "inferencePort": 8888,
+                    "service": {"image": "new:tag"},
+                }
+            ]
+        )
+    )
+    agents = agents_for()
+    manager = make_manager(db, registry, runner, agents)
+
+    await wait_job(db, await manager.redeploy("dep-1", recipe=changed), "succeeded")
+
+    agent1_calls = agents[NODE_01_URL].calls
+    agent2_calls = agents[NODE_02_URL].calls
+    assert ("down", "spark-fleet-demo-glm-head") in agent1_calls
+    assert ("down", "spark-fleet-demo-glm-worker") in agent2_calls
+    assert ("up", "spark-fleet-demo-glm-solo") in agent1_calls
+    assert db.get_deployment("dep-1")["status"] == "loaded"
 
 
 async def test_failed_redeploy_clears_primary(db, registry, runner):

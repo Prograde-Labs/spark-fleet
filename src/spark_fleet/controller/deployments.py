@@ -106,6 +106,7 @@ class DeploymentManager:
         recipe: Recipe | None = None,
     ) -> str:
         deployment = self._require_deployment(deployment_id)
+        previous_recipe = self._recipe(deployment)
         if recipe is not None:
             self._validate_load(deployment, recipe, allow_loaded=True)
             self._db.update_deployment_recipe(
@@ -115,11 +116,15 @@ class DeploymentManager:
                 mode=recipe.spec.mode,
             )
             deployment = self._require_deployment(deployment_id)
-        current = recipe if recipe is not None else self._recipe(deployment)
+        current = recipe if recipe is not None else previous_recipe
         self._validate_load(deployment, current, allow_loaded=True)
         return await self._runner.submit(
             "deployment.redeploy",
-            {"deployment_id": deployment_id, "primary": primary},
+            {
+                "deployment_id": deployment_id,
+                "primary": primary,
+                "previous_recipe": previous_recipe.model_dump(by_alias=True, exclude_unset=True),
+            },
             deployment_id=deployment_id,
             locks=self._locks(deployment_id, current),
         )
@@ -159,16 +164,26 @@ class DeploymentManager:
             allow_loaded=job.kind == "deployment.redeploy",
         )
         primary_requested = bool(payload.get("primary"))
+        was_loaded = deployment["status"] == "loaded"
+        stop_recipe = recipe
+        previous_recipe = payload.get("previous_recipe")
+        if isinstance(previous_recipe, Mapping):
+            try:
+                stop_recipe = parse_recipe(previous_recipe)
+            except RecipeError:
+                stop_recipe = recipe
 
         clients = _ClientPool(self._registry, self._token, self._client_factory)
         started: list[tuple[RoleSpec, str, AgentClient]] = []
         displaced: list[tuple[dict[str, Any], bool]] = []
+        stop_attempted = False
         try:
             await self._validate_models(recipe, clients)
 
-            if deployment["status"] == "loaded":
+            if was_loaded:
+                stop_attempted = True
                 self._event(job, "stopping current roles", phase="stop")
-                errors = await self._stop_roles(deployment, recipe, clients)
+                errors = await self._stop_roles(deployment, stop_recipe, clients)
                 if errors:
                     raise DeploymentError("; ".join(errors))
 
@@ -194,44 +209,59 @@ class DeploymentManager:
             self._event(job, "deployment loaded", phase="loaded")
             return {"deployment_id": deployment_id, "status": "loaded"}
         except asyncio.CancelledError:
+            current = asyncio.current_task()
+            uncancel = getattr(current, "uncancel", None)
+            if uncancel is not None:
+                uncancel()
             self._event(job, "deployment cancelled", level="error", phase="cancelled")
-            for role in recipe.spec.roles:
-                self._db.upsert_role(
-                    deployment_id,
-                    role.name,
-                    role.node,
-                    role.class_,
-                    role.start_order,
-                    status="stopped",
-                )
-            self._db.update_deployment(deployment_id, status="failed", error="cancelled")
-            if deployment["is_primary"]:
-                self._db.clear_primary()
-            cleanup = asyncio.create_task(self._stop_started(deployment_id, started))
-            try:
-                await asyncio.wait_for(asyncio.shield(cleanup), timeout=5.0)
-            except (TimeoutError, asyncio.CancelledError):
-                pass
+            if stop_attempted:
+                await self._stop_roles(deployment, stop_recipe, clients)
+                for role in stop_recipe.spec.roles:
+                    self._mark_role_stopped(deployment_id, role)
+                self._db.update_deployment(deployment_id, status="failed", error="cancelled")
+                if deployment["is_primary"]:
+                    self._db.clear_primary()
+            elif started:
+                await self._stop_started(deployment_id, started)
+                for role in recipe.spec.roles:
+                    self._mark_role_stopped(deployment_id, role)
+                self._db.update_deployment(deployment_id, status="failed", error="cancelled")
+                if deployment["is_primary"]:
+                    self._db.clear_primary()
+            elif not was_loaded:
+                for role in recipe.spec.roles:
+                    self._mark_role_stopped(deployment_id, role)
+                self._db.update_deployment(deployment_id, status="failed", error="cancelled")
             raise
         except Exception as exc:
             error = str(exc)
             self._event(job, f"deployment failed: {error}", level="error", phase="failed")
-            await self._stop_started(deployment_id, started)
-            for role in recipe.spec.roles:
-                self._db.upsert_role(
-                    deployment_id,
-                    role.name,
-                    role.node,
-                    role.class_,
-                    role.start_order,
-                    status="stopped",
-                )
-            self._db.update_deployment(deployment_id, status="failed", error=error)
-            if deployment["is_primary"]:
-                self._db.clear_primary()
-            rollback_errors = await self._rollback(displaced, clients, job)
-            if rollback_errors:
-                error = f"{error}; rollback: {'; '.join(rollback_errors)}"
+            if stop_attempted:
+                await self._stop_started(deployment_id, started)
+                for role in stop_recipe.spec.roles:
+                    self._mark_role_stopped(deployment_id, role)
+                for role in recipe.spec.roles:
+                    self._mark_role_stopped(deployment_id, role)
+                self._db.update_deployment(deployment_id, status="failed", error=error)
+                if deployment["is_primary"]:
+                    self._db.clear_primary()
+                rollback_errors = await self._rollback(displaced, clients, job)
+                if rollback_errors:
+                    error = f"{error}; rollback: {'; '.join(rollback_errors)}"
+            elif started:
+                await self._stop_started(deployment_id, started)
+                for role in recipe.spec.roles:
+                    self._mark_role_stopped(deployment_id, role)
+                self._db.update_deployment(deployment_id, status="failed", error=error)
+                if deployment["is_primary"]:
+                    self._db.clear_primary()
+                rollback_errors = await self._rollback(displaced, clients, job)
+                if rollback_errors:
+                    error = f"{error}; rollback: {'; '.join(rollback_errors)}"
+            elif not was_loaded:
+                for role in recipe.spec.roles:
+                    self._mark_role_stopped(deployment_id, role)
+                self._db.update_deployment(deployment_id, status="failed", error=error)
             raise DeploymentError(error) from exc
         finally:
             await clients.close()
@@ -441,6 +471,13 @@ class DeploymentManager:
                 )
                 if was_primary:
                     self._db.set_primary(deployment["id"])
+            except asyncio.CancelledError:
+                current = asyncio.current_task()
+                uncancel = getattr(current, "uncancel", None)
+                if uncancel is not None:
+                    uncancel()
+                await self._stop_started(deployment["id"], rollback_started)
+                raise
             except Exception as exc:
                 await self._stop_started(deployment["id"], rollback_started)
                 errors.append(f"{deployment['name']}: {exc}")
@@ -632,6 +669,16 @@ class DeploymentManager:
         level: str = "info",
     ) -> None:
         self._db.append_job_event(job.id, message, level=level, phase=phase)
+
+    def _mark_role_stopped(self, deployment_id: str, role: RoleSpec) -> None:
+        self._db.upsert_role(
+            deployment_id,
+            role.name,
+            role.node,
+            role.class_,
+            role.start_order,
+            status="stopped",
+        )
 
     async def _check_readiness(
         self,
