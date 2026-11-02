@@ -88,9 +88,10 @@ def _resolve_ranks(recipe: Recipe, node_ranks: Mapping[str, int] | None) -> dict
         return {role.name: index for index, role in enumerate(heavy)}
 
     heavy_names = {role.name for role in heavy}
-    unknown = sorted(set(node_ranks) - heavy_names)
+    unknown = sorted((set(node_ranks) - heavy_names), key=str)
     if unknown:
-        raise RenderError(f"node ranks provided for non-heavy roles: {', '.join(unknown)}")
+        names = ", ".join(str(name) for name in unknown)
+        raise RenderError(f"node ranks provided for unknown or non-heavy roles: {names}")
 
     ranks: dict[str, int] = {}
     for role in heavy:
@@ -226,17 +227,39 @@ def _normalize_labels(labels: Mapping[str, str] | list[str]) -> dict[str, str]:
 
 def _resolve_value(value: Any, context: Mapping[str, str]) -> Any:
     if isinstance(value, str):
-        resolved = _PLACEHOLDER_RE.sub(
+        _check_placeholder_syntax(value)
+        return _PLACEHOLDER_RE.sub(
             lambda match: _resolve_placeholder(match.group(1).strip(), context), value
         )
-        if "{{" in resolved or "}}" in resolved:
-            raise RenderError(f"unterminated placeholder: {value!r}")
-        return resolved
     if isinstance(value, list):
         return [_resolve_value(item, context) for item in value]
     if isinstance(value, dict):
-        return {key: _resolve_value(item, context) for key, item in value.items()}
+        return {
+            (_resolve_value(key, context) if isinstance(key, str) else key): _resolve_value(
+                item, context
+            )
+            for key, item in value.items()
+        }
     return value
+
+
+def _check_placeholder_syntax(value: str) -> None:
+    """Reject malformed ``{{ ... }}`` markers without touching literal braces."""
+
+    index = 0
+    while True:
+        start = value.find("{{", index)
+        if start == -1:
+            return
+        end = value.find("}}", start + 2)
+        if end == -1:
+            raise RenderError(f"unterminated placeholder: {value!r}")
+        nested = value.find("{{", start + 2)
+        if nested != -1 and nested < end:
+            raise RenderError(f"malformed placeholder: {value!r}")
+        if not value[start + 2 : end].strip():
+            raise RenderError(f"empty placeholder: {value!r}")
+        index = end + 2
 
 
 def _resolve_placeholder(key: str, context: Mapping[str, str]) -> str:

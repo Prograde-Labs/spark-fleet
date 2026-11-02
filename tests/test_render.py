@@ -481,8 +481,45 @@ def test_brace_only_placeholder_rejected():
     data = copy.deepcopy(DEPLOYMENT)
     data["spec"]["roles"][0]["service"]["environment"]["BAD"] = "{{}}"
 
-    with pytest.raises(RenderError, match="unterminated placeholder"):
+    with pytest.raises(RenderError, match="empty placeholder"):
         render(parse_recipe(data))
+
+
+def test_resolved_value_may_contain_braces():
+    data = copy.deepcopy(DEPLOYMENT)
+    data["spec"]["roles"][0]["service"]["environment"]["ID"] = "{{ deployment.id }}"
+
+    rendered = render(parse_recipe(data), deployment_id="id}}x")
+
+    assert rendered[0].compose["services"]["workload"]["environment"]["ID"] == "id}}x"
+
+
+def test_literal_braces_are_preserved():
+    data = copy.deepcopy(DEPLOYMENT)
+    data["spec"]["roles"][0]["service"]["environment"]["AWK"] = "awk '{print $1}}'"
+
+    workload = render(parse_recipe(data))[0].compose["services"]["workload"]
+
+    assert workload["environment"]["AWK"] == "awk '{print $1}}'"
+
+
+def test_placeholder_in_environment_key_is_resolved():
+    data = copy.deepcopy(DEPLOYMENT)
+    data["spec"]["roles"][0]["service"]["environment"]["{{ deployment.name }}"] = "value"
+
+    workload = render(parse_recipe(data))[0].compose["services"]["workload"]
+
+    assert workload["environment"]["demo-glm"] == "value"
+
+
+def test_rank_key_of_wrong_type_is_reported():
+    with pytest.raises(RenderError, match="unknown or non-heavy roles: 3"):
+        render(ranks={"head": 0, "worker": 1, 3: 2})
+
+
+def test_rank_for_unknown_role_is_reported():
+    with pytest.raises(RenderError, match="unknown or non-heavy roles: ghost"):
+        render(ranks={"head": 0, "worker": 1, "ghost": 2})
 
 
 def test_nan_extra_rejected():
