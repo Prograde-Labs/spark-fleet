@@ -515,6 +515,15 @@ def test_duplicate_key_after_resolution_rejected():
         render(parse_recipe(data))
 
 
+def test_literal_braces_around_placeholder_supported():
+    data = copy.deepcopy(DEPLOYMENT)
+    data["spec"]["roles"][0]["service"]["environment"]["BRACED"] = "{{{ deployment.name }}}"
+
+    workload = render(parse_recipe(data))[0].compose["services"]["workload"]
+
+    assert workload["environment"]["BRACED"] == "{demo-glm}"
+
+
 def test_literal_braces_are_preserved():
     data = copy.deepcopy(DEPLOYMENT)
     data["spec"]["roles"][0]["service"]["environment"]["AWK"] = "awk '{print $1}}'"

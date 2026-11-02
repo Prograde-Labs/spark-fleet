@@ -252,6 +252,9 @@ def _check_placeholder_syntax(value: str) -> None:
         start = value.find("{{", index)
         if start == -1:
             return
+        if value[start : start + 3] == "{{{":
+            # A literal "{" immediately before a marker: `{{{ value }}}`.
+            start += 1
         end = value.find("}}", start + 2)
         if end == -1:
             raise RenderError(f"unterminated placeholder: {value!r}")
