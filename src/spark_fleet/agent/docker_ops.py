@@ -180,6 +180,21 @@ def follow_container_logs(container_id: str, *, tail: int = 200) -> Iterator[str
             process.stdout.close()
 
 
+def pull_image(image: str, *, timeout: float = 1800.0) -> str:
+    """Pull ``image`` and return the CLI output."""
+
+    result = _run([DOCKER, "pull", image], timeout)
+    _require_success(result, f"docker pull {image}")
+    return result.stdout
+
+
+def remove_container(name: str, *, timeout: float = 60.0) -> None:
+    """Force-remove a container by name (used to cancel one-shot jobs)."""
+
+    result = _run([DOCKER, "rm", "-f", name], timeout)
+    _require_success(result, f"docker rm -f {name}")
+
+
 def _parse_ndjson(output: str, description: str) -> list[dict[str, Any]]:
     rows: list[dict[str, Any]] = []
     for line in output.splitlines():
