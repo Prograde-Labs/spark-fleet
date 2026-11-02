@@ -668,8 +668,69 @@ def test_migration_rolls_back_on_failure(tmp_path):
             for row in connection.execute("SELECT name FROM sqlite_master WHERE type = 'table'")
         }
         version = connection.execute("PRAGMA user_version").fetchone()[0]
+        auto_vacuum = connection.execute("PRAGMA auto_vacuum").fetchone()[0]
     finally:
         connection.close()
 
     assert tables == {"settings"}
     assert version == 0
+    assert auto_vacuum == 2
+
+
+def test_version_zero_file_with_table_converts_to_incremental_vacuum(tmp_path):
+    path = tmp_path / "fleet.sqlite"
+    connection = sqlite3.connect(path)
+    connection.execute("CREATE TABLE probe (x INTEGER)")
+    connection.execute("PRAGMA auto_vacuum = NONE")
+    connection.execute("VACUUM")
+    connection.execute("PRAGMA user_version = 0")
+    connection.commit()
+    connection.close()
+
+    database = Database(path)
+    try:
+        assert database.schema_version == SCHEMA_VERSION
+        assert database.auto_vacuum_mode == 2
+        database.incremental_vacuum()
+    finally:
+        database.close()
+
+
+def test_read_only_legacy_database_fails_cleanly(tmp_path):
+    path = tmp_path / "fleet.sqlite"
+    connection = sqlite3.connect(path)
+    connection.execute("CREATE TABLE probe (x INTEGER)")
+    connection.execute("PRAGMA auto_vacuum = NONE")
+    connection.execute("VACUUM")
+    connection.execute("PRAGMA user_version = 1")
+    connection.commit()
+    connection.close()
+    path.chmod(0o444)
+
+    try:
+        with pytest.raises(DatabaseError, match="open failed"):
+            Database(path)
+    finally:
+        path.chmod(0o644)
+
+
+def test_failed_open_does_not_leak_connection(tmp_path):
+    import gc
+    import warnings
+
+    path = tmp_path / "fleet.sqlite"
+    database = Database(path)
+    database.close()
+
+    connection = sqlite3.connect(path)
+    connection.execute("PRAGMA user_version = 99")
+    connection.commit()
+    connection.close()
+
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        with pytest.raises(DatabaseError, match="newer"):
+            Database(path)
+        gc.collect()
+
+    assert not any(issubclass(warning.category, ResourceWarning) for warning in caught)

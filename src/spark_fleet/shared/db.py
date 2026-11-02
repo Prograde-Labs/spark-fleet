@@ -185,6 +185,8 @@ class Database:
                 )
 
             if self.auto_vacuum_mode != 2:
+                # A failed rebuild aborts startup rather than silently
+                # continuing without incremental vacuum.
                 self._conn.execute("PRAGMA auto_vacuum = INCREMENTAL")
                 self._conn.execute("VACUUM")
 
