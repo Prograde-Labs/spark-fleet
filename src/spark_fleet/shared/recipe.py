@@ -342,6 +342,12 @@ def _published_ports(service: ServiceSpec) -> list[tuple[int, int, str]]:
                 raise ValueError(f"invalid container port: {target!r}")
 
             published = entry.get("published")
+            host_ip = entry.get("host_ip")
+            if host_ip is not None:
+                if not isinstance(host_ip, str):
+                    raise ValueError(f"invalid bind address: {host_ip!r}")
+                if host_ip:
+                    _validate_bind_ip(host_ip)
             protocol = entry.get("protocol", "tcp")
             if not isinstance(protocol, str):
                 raise ValueError(f"invalid port protocol: {protocol!r}")

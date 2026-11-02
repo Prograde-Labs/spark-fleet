@@ -650,6 +650,7 @@ def test_published_port_shapes_are_claimed(port_entry):
         {"target": 70000, "published": None},
         {"target": "8000-9500"},
         {"published": 9000},
+        {"target": 8080, "published": 9000, "host_ip": "300.300.300.300"},
     ],
 )
 def test_invalid_published_ports_rejected(port_entry):
@@ -1099,3 +1100,42 @@ def test_overlap_ending_at_owner_low_rejected():
 
     with pytest.raises(RecipeError, match="duplicate port 9005"):
         parse_recipe(data)
+
+
+def test_overlap_where_later_range_encloses_owner_rejected():
+    data = copy.deepcopy(DEPLOYMENT)
+    for role in data["spec"]["roles"]:
+        role["class"] = "light"
+        role["node"] = "spark-01"
+        del role["inferencePort"]
+    data["spec"]["roles"][0]["service"]["ports"] = ["9000-9005:8080"]
+    data["spec"]["roles"][1]["service"]["ports"] = ["8990-9010:8081"]
+
+    with pytest.raises(RecipeError, match="duplicate port 9000"):
+        parse_recipe(data)
+
+
+def test_long_form_published_range_claims_entire_range():
+    data = copy.deepcopy(DEPLOYMENT)
+    for role in data["spec"]["roles"]:
+        role["class"] = "light"
+        role["node"] = "spark-01"
+        del role["inferencePort"]
+    data["spec"]["roles"][0]["service"]["ports"] = [{"target": 8080, "published": "8000-9500"}]
+    data["spec"]["roles"][1]["service"]["ports"] = ["9500:9500"]
+
+    with pytest.raises(RecipeError, match="duplicate port 9500"):
+        parse_recipe(data)
+
+
+def test_long_form_host_ip_allowed():
+    data = copy.deepcopy(SERVICE)
+    data["spec"]["roles"][0]["service"]["ports"] = [
+        {"target": 8080, "published": 8080, "host_ip": "127.0.0.1"}
+    ]
+
+    recipe = parse_recipe(data)
+
+    assert recipe.spec.roles[0].service.ports == [
+        {"target": 8080, "published": 8080, "host_ip": "127.0.0.1"}
+    ]
