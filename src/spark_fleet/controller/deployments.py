@@ -314,7 +314,7 @@ class DeploymentManager:
         for role in sorted(recipe.spec.roles, key=lambda item: (item.start_order, item.name)):
             node = self._registry.require(role.node)
             client = await clients.get(role.node)
-            project = _project_name(deployment["name"], role.name)
+            project = project_name(deployment["name"], role.name)
             rendered_role = rendered_by_role[role.name]
             self._event(job, f"starting role {role.name}", phase="role")
 
@@ -379,7 +379,7 @@ class DeploymentManager:
             recipe.spec.roles, key=lambda item: (item.start_order, item.name), reverse=True
         ):
             client = await clients.get(role.node)
-            project = _project_name(deployment["name"], role.name)
+            project = project_name(deployment["name"], role.name)
             try:
                 await client.down_compose(project)
             except AgentError as exc:
@@ -410,7 +410,7 @@ class DeploymentManager:
             entries, key=lambda item: (item[0], item[1]), reverse=True
         ):
             client = await clients.get(role.node)
-            project = _project_name(deployment["name"], role.name)
+            project = project_name(deployment["name"], role.name)
             try:
                 await client.down_compose(project)
             except AgentError as exc:
@@ -573,7 +573,7 @@ class DeploymentManager:
 
     def _validate_projects(self, deployment: Mapping[str, Any], recipe: Recipe) -> None:
         for role in recipe.spec.roles:
-            project = _project_name(deployment["name"], role.name)
+            project = project_name(deployment["name"], role.name)
             if not _PROJECT_RE.fullmatch(project):
                 raise DeploymentError(
                     f"project name {project!r} is too long or invalid; "
@@ -853,7 +853,7 @@ async def _default_tcp_probe(host: str, port: int, timeout: float) -> None:
     await writer.wait_closed()
 
 
-def _project_name(deployment_name: str, role_name: str) -> str:
+def project_name(deployment_name: str, role_name: str) -> str:
     return f"spark-fleet-{deployment_name}-{role_name}"
 
 

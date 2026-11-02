@@ -7,7 +7,7 @@ import os
 import re
 import tempfile
 import uuid
-from collections.abc import Callable, Mapping
+from collections.abc import AsyncIterator, Callable, Mapping
 from dataclasses import asdict
 from pathlib import Path
 from typing import Any
@@ -68,8 +68,9 @@ def build_app(
     session_secret: str | None = None,
     ui_password: str | None = None,
     client_factory: Callable[[str, str], AgentClient] | None = None,
+    lifespan: Callable[[FastAPI], AsyncIterator[None]] | None = None,
 ) -> FastAPI:
-    app = FastAPI(title="spark-fleet controller")
+    app = FastAPI(title="spark-fleet controller", lifespan=lifespan)
     recipes_dir = Path(recipes_dir)
     client_factory = client_factory or AgentClient
     session_dep = ui_session_dependency(session_secret)
