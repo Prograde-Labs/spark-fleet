@@ -453,3 +453,42 @@ def test_filter_response_headers_drops_stale_encoding_headers():
             "x-upstream": "1",
         }
     ) == {"content-type": "application/json", "x-upstream": "1"}
+
+
+def test_routing_prefers_named_head_even_with_lower_start_order(db):
+    add_node(db, "spark-01", "192.0.2.239")
+    add_node(db, "spark-02", "192.0.2.79")
+    recipe_doc = {
+        "apiVersion": "spark-fleet/v1",
+        "kind": "Recipe",
+        "metadata": {"name": "multi"},
+        "spec": {
+            "mode": "deployment",
+            "runtime": "custom",
+            "model": {"repo": "org/model", "servedName": "MULTI"},
+            "gateway": {"aliases": ["multi"]},
+            "roles": [
+                {
+                    "name": "head",
+                    "node": "spark-01",
+                    "class": "heavy",
+                    "startOrder": 10,
+                    "inferencePort": 8888,
+                    "service": {"image": "img"},
+                },
+                {
+                    "name": "worker",
+                    "node": "spark-02",
+                    "class": "heavy",
+                    "startOrder": 20,
+                    "service": {"image": "img"},
+                },
+            ],
+        },
+    }
+    db.create_deployment("dep-1", "multi", "multi", "deployment", recipe_doc, status="loaded")
+    gateway = FleetGateway(db)
+
+    route = gateway.resolve("multi")
+
+    assert route.upstream_url == "http://192.0.2.239:8888"

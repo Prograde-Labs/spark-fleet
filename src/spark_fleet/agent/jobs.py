@@ -12,6 +12,7 @@ from __future__ import annotations
 import re
 import subprocess
 import threading
+from collections import deque
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any
@@ -50,7 +51,7 @@ class OneShotJob:
         self._container_name = container_name
         self._process = process
         self._cancelled = False
-        self._chunks: list[str] = []
+        self._chunks: deque[str] = deque()
         self._log_chars = 0
         self._reader = threading.Thread(target=self._drain, daemon=True)
         self._reader.start()
@@ -65,7 +66,7 @@ class OneShotJob:
                 self._log_chars += len(chunk)
                 while self._log_chars > _MAX_LOG_CHARS and self._chunks:
                     if len(self._chunks) > 1:
-                        self._log_chars -= len(self._chunks.pop(0))
+                        self._log_chars -= len(self._chunks.popleft())
                     else:
                         overflow = self._log_chars - _MAX_LOG_CHARS
                         self._chunks[0] = self._chunks[0][overflow:]
@@ -101,7 +102,7 @@ class OneShotJob:
             "exit_code": exit_code,
             # Logs are only meaningful once the process exits; polling a chatty
             # job every second should not resend the whole buffer.
-            "logs": "" if exit_code is None else "".join(tuple(self._chunks)),
+            "logs": "" if exit_code is None else "".join(self._chunks),
             "cancelled": self._cancelled,
         }
 

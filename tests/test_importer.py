@@ -12,6 +12,7 @@ from spark_fleet.controller.importer import (
     SkippedWorkload,
 )
 from spark_fleet.shared.db import Database
+from spark_fleet.shared.recipe import parse_recipe
 from spark_fleet.shared.render import NodeAddress
 
 NODES = {
@@ -389,7 +390,7 @@ async def test_plan_sanitizes_folded_prepare_fields():
                 "workload": {
                     "image": "pull:tag",
                     "environment": ["A=1", "B=2"],
-                    "volumes": ["/data:/data", {"type": "bind", "source": "/x"}],
+                    "volumes": ["/data:/data", {"type": "bind", "source": "/x", "target": "/x"}],
                     "command": ["pull"],
                 }
             },
@@ -405,7 +406,7 @@ async def test_plan_sanitizes_folded_prepare_fields():
 
     prepare = plan.proposals[0].recipe.spec.prepare[0]
     assert prepare.environment == {"A": "1", "B": "2"}
-    assert prepare.volumes == ["/data:/data"]
+    assert prepare.volumes == ["/data:/data", "/x:/x"]
 
 
 async def test_plan_reports_unreadable_instances():
@@ -425,3 +426,85 @@ async def test_plan_reports_unreadable_instances():
     assert plan.proposals == ()
     assert plan.skipped[0].name == "demo-glm-head"
     assert "could not read instance" in plan.skipped[0].reason
+
+
+async def test_apply_refuses_existing_recipe_file(tmp_path):
+    sources = fake_sources([workload("demo-glm-head")], {"demo-glm-head": instance_yaml()})
+    plan = await Importer(NODES).plan(sources)
+    db = Database(tmp_path / "fleet.db")
+    recipes = tmp_path / "recipes"
+    recipes.mkdir()
+    recipes.joinpath("demo-glm.yaml").write_text("USER RECIPE")
+
+    with pytest.raises(ImporterError, match="already exists"):
+        plan.apply(db, confirm=True, recipes_dir=recipes)
+
+    assert recipes.joinpath("demo-glm.yaml").read_text() == "USER RECIPE"
+    assert db.list_deployments() == []
+
+
+async def test_apply_refuses_alias_conflict_with_loaded_deployment(tmp_path):
+    sources = fake_sources([workload("demo-glm-head")], {"demo-glm-head": instance_yaml()})
+    plan = await Importer(NODES).plan(sources)
+    db = Database(tmp_path / "fleet.db")
+    other = parse_recipe(
+        {
+            "apiVersion": "spark-fleet/v1",
+            "kind": "Recipe",
+            "metadata": {"name": "other"},
+            "spec": {
+                "mode": "deployment",
+                "runtime": "custom",
+                "model": {"repo": "org/other", "servedName": "OTHER"},
+                "gateway": {"aliases": ["Demo-Model-B"]},
+                "roles": [
+                    {
+                        "name": "head",
+                        "node": "spark-01",
+                        "class": "heavy",
+                        "inferencePort": 8888,
+                        "service": {"image": "img"},
+                    }
+                ],
+            },
+        }
+    )
+    db.create_deployment(
+        "dep-other",
+        "other",
+        "other",
+        "deployment",
+        other.model_dump(by_alias=True, exclude_unset=True),
+        status="loaded",
+    )
+
+    with pytest.raises(ImporterError, match="aliases already in use"):
+        plan.apply(db, confirm=True)
+
+    assert db.list_deployments()[0]["name"] == "other"
+
+
+async def test_plan_reports_unusable_folded_helper():
+    helper_config = yaml.safe_dump(
+        {
+            "x-class": "light",
+            "services": {
+                "workload": {
+                    "image": "",
+                    "command": ["pull"],
+                }
+            },
+        },
+        sort_keys=False,
+    )
+    sources = fake_sources(
+        [workload("demo-glm-head"), workload("demo-glm-pull-helper", "light", None, ())],
+        {"demo-glm-head": instance_yaml(name="demo-glm-head"), "demo-glm-pull-helper": helper_config},
+    )
+
+    plan = await Importer(NODES).plan(sources)
+
+    assert plan.proposals
+    assert any(
+        item.name == "demo-glm-pull-helper" and "no image" in item.reason for item in plan.skipped
+    )

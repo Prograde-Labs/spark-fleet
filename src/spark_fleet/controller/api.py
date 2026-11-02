@@ -761,7 +761,7 @@ def _deployment_recipe(deployment: Mapping[str, Any], recipes_dir: Path) -> Reci
     try:
         return _read_recipe(recipes_dir, deployment["recipe_name"])
     except HTTPException as exc:
-        if exc.status_code != 404:
+        if exc.status_code not in (400, 404):
             raise
     try:
         return parse_recipe(deployment["recipe"])
@@ -794,10 +794,10 @@ def _deployment_dicts(db: Database, recipes_dir: Path) -> list[dict[str, Any]]:
 def _is_stale(deployment: Mapping[str, Any], recipes_dir: Path) -> bool:
     if deployment["status"] != "loaded":
         return False
-    path = recipes_dir / f"{deployment['recipe_name']}.yaml"
     try:
+        path = _recipe_path(recipes_dir, deployment["recipe_name"])
         recipe = parse_recipe_yaml(path.read_text(encoding="utf-8"))
-    except (OSError, RecipeError):
+    except (HTTPException, OSError, RecipeError):
         return False
     current = recipe.model_dump(by_alias=True, exclude_unset=True)
     return json.dumps(deployment["recipe"], sort_keys=True, default=str) != json.dumps(

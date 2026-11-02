@@ -11,8 +11,10 @@ recipes and diffs; applying them requires explicit confirmation.
 from __future__ import annotations
 
 import difflib
+import os
 import re
 import shlex
+import tempfile
 import uuid
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
@@ -29,6 +31,7 @@ from spark_fleet.shared.recipe import (
     Recipe,
     RecipeError,
     parse_recipe,
+    parse_recipe_yaml,
     recipe_to_yaml,
 )
 from spark_fleet.shared.render import NodeAddress
@@ -91,9 +94,46 @@ class ImportPlan:
         duplicates = sorted({name for name in names if names.count(name) > 1})
         if duplicates:
             raise ImporterError(f"duplicate recipe names: {', '.join(duplicates)}")
+        existing_recipe_names = {item["recipe_name"] for item in db.list_deployments()}
         for name in names:
             if db.get_deployment_by_name(name) is not None:
                 raise ImporterError(f"deployment {name!r} already exists")
+            if name in existing_recipe_names:
+                raise ImporterError(f"recipe {name!r} is already used by a deployment")
+            if recipes_dir is not None and (recipes_dir / f"{name}.yaml").exists():
+                raise ImporterError(f"recipe file {name!r} already exists")
+
+        aliases: set[str] = set()
+        for proposal in self.proposals:
+            proposal_aliases = _aliases(proposal.recipe)
+            overlap = aliases & proposal_aliases
+            if overlap:
+                raise ImporterError(f"duplicate aliases in import: {', '.join(sorted(overlap))}")
+            aliases |= proposal_aliases
+        for deployment in db.list_deployments():
+            if deployment["status"] != "loaded":
+                continue
+            try:
+                other = parse_recipe(deployment["recipe"])
+            except RecipeError:
+                continue
+            overlap = aliases & _aliases(other)
+            if overlap:
+                raise ImporterError(
+                    f"aliases already in use by {deployment['name']}: {', '.join(sorted(overlap))}"
+                )
+        if recipes_dir is not None and recipes_dir.is_dir():
+            for path in recipes_dir.glob("*.yaml"):
+                try:
+                    other = parse_recipe_yaml(path.read_text(encoding="utf-8"))
+                except (OSError, RecipeError):
+                    continue
+                overlap = aliases & _aliases(other)
+                if overlap:
+                    raise ImporterError(
+                        f"aliases already used by {path.stem}: {', '.join(sorted(overlap))}"
+                    )
+
         created: list[str] = []
         for proposal in self.proposals:
             name = proposal.recipe.metadata.name
@@ -108,9 +148,7 @@ class ImportPlan:
             )
             if recipes_dir is not None:
                 recipes_dir.mkdir(parents=True, exist_ok=True)
-                (recipes_dir / f"{name}.yaml").write_text(
-                    recipe_to_yaml(proposal.recipe), encoding="utf-8"
-                )
+                _write_recipe_file(recipes_dir / f"{name}.yaml", recipe_to_yaml(proposal.recipe))
             created.append(deployment_id)
         return created
 
@@ -266,7 +304,11 @@ class Importer:
                 skipped.append(SkippedWorkload(item.name, "obsolete log helper"))
                 continue
             if any(pattern in lowered for pattern in _HELPER_PATTERNS):
-                attached = _attach_prepare(group_recipes, item, self._replace)
+                try:
+                    attached = _attach_prepare(group_recipes, item, self._replace)
+                except ImporterError as exc:
+                    skipped.append(SkippedWorkload(item.name, str(exc)))
+                    continue
                 if attached:
                     skipped.append(
                         SkippedWorkload(item.name, f"folded into {attached} prepare jobs")
@@ -574,16 +616,16 @@ def _attach_prepare(
             services = item.config.get("services")
             workload = services.get("workload") if isinstance(services, Mapping) else None
             if not isinstance(workload, Mapping):
-                return None
+                raise ImporterError("helper has no services.workload")
             service = replace(dict(workload))
             image = service.get("image")
             if not isinstance(image, str) or not image:
-                return None
+                raise ImporterError("helper has no image")
             command = service.get("command")
             if isinstance(command, str):
                 command = shlex.split(command)
             if not isinstance(command, list) or not command:
-                return None
+                raise ImporterError("helper has no command")
             volumes = service.get("volumes", [])
             if not isinstance(volumes, list):
                 volumes = []
@@ -592,7 +634,7 @@ def _attach_prepare(
                 "node": item.node_id,
                 "image": image,
                 "command": [str(part) for part in command],
-                "volumes": [volume for volume in volumes if isinstance(volume, str)],
+                "volumes": [_volume_string(volume) for volume in volumes],
                 "environment": _prepare_environment(service.get("environment")),
             }
             group_recipes[name].setdefault("spec", {}).setdefault("prepare", []).append(prepare)
@@ -602,19 +644,58 @@ def _attach_prepare(
 
 def _prepare_environment(value: Any) -> dict[str, Any]:
     if isinstance(value, Mapping):
-        return {
-            str(key): item
-            for key, item in value.items()
-            if isinstance(item, (str, int, float, bool))
-        }
-    if isinstance(value, list):
         result: dict[str, Any] = {}
+        for key, item in value.items():
+            if not isinstance(item, (str, int, float, bool)):
+                raise ImporterError(f"helper environment {key!r} has a non-scalar value")
+            result[str(key)] = item
+        return result
+    if isinstance(value, list):
+        result = {}
         for entry in value:
             key, separator, item = str(entry).partition("=")
-            if separator:
-                result[key] = item
+            if not separator:
+                raise ImporterError(f"helper environment entry {entry!r} is not KEY=VALUE")
+            result[key] = item
         return result
     return {}
+
+
+def _volume_string(value: Any) -> str:
+    if isinstance(value, str):
+        return value
+    if isinstance(value, Mapping):
+        source = value.get("source")
+        target = value.get("target")
+        if isinstance(source, str) and isinstance(target, str):
+            mount = f"{source}:{target}"
+            if value.get("read_only") is True:
+                mount += ":ro"
+            return mount
+    raise ImporterError(f"unsupported helper volume: {value!r}")
+
+
+def _aliases(recipe: Recipe) -> set[str]:
+    aliases: set[str] = set()
+    if recipe.spec.gateway is not None:
+        aliases.update(recipe.spec.gateway.aliases)
+    if recipe.spec.model is not None:
+        aliases.add(recipe.spec.model.served_name)
+    return aliases
+
+
+def _write_recipe_file(path: Path, text: str) -> None:
+    temporary: Path | None = None
+    try:
+        with tempfile.NamedTemporaryFile(
+            mode="w", dir=path.parent, suffix=".tmp", delete=False, encoding="utf-8"
+        ) as handle:
+            temporary = Path(handle.name)
+            handle.write(text)
+        os.replace(temporary, path)
+    finally:
+        if temporary is not None and temporary.exists():
+            temporary.unlink(missing_ok=True)
 
 
 def _sanitize(value: str) -> str:

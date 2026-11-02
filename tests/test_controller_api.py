@@ -1051,3 +1051,15 @@ def test_gateway_models_reports_duplicate_alias_as_409(env):
 
 def test_invalid_limit_is_rejected(env):
     assert env.client.get("/api/jobs", params={"limit": 0}).status_code == 422
+
+
+def test_redeploy_falls_back_when_recipe_file_is_corrupt(env):
+    add_node(env.client)
+    add_recipe(env, "glm")
+    add_deployment(env.db)
+    env.recipes_dir.joinpath("glm.yaml").write_text("not: [valid")
+
+    response = env.client.post("/api/deployments/dep-1/redeploy")
+
+    assert response.status_code == 200
+    assert env.deployments.calls[-1][3].metadata.name == "glm"

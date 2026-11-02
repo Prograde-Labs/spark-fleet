@@ -187,22 +187,21 @@ class Controller:
             )
 
         roles = {row["role_name"]: row for row in self.db.list_roles(deployment["id"])}
-        problems: list[str] = []
+        definite: list[str] = []
+        unreachable_problems: list[str] = []
         refreshed: dict[str, Mapping[str, Any]] = {}
-        unreachable = False
 
         for role in recipe.spec.roles:
             row = roles.get(role.name)
             node = self.registry.get(role.node)
             if node is None:
-                problems.append(f"{role.name}: node {role.node} is not registered")
+                definite.append(f"{role.name}: node {role.node} is not registered")
                 continue
             client = self.client_factory(node.agent_url, self.config.agent_token)
             try:
                 statuses = await client.compose_status(project_name(deployment["name"], role.name))
             except AgentError as exc:
-                unreachable = True
-                problems.append(f"{role.name}: status unavailable ({exc})")
+                unreachable_problems.append(f"{role.name}: status unavailable ({exc})")
                 continue
             finally:
                 await client.aclose()
@@ -212,23 +211,25 @@ class Controller:
                 container_id=row.get("container_id") if row else None,
             )
             if match is None or match.get("state") != "running":
-                problems.append(f"{role.name}: container is not running")
+                definite.append(f"{role.name}: container is not running")
                 continue
             refreshed[role.name] = match
 
-        if unreachable:
+        if definite:
+            return await self._fail(
+                deployment, definite + unreachable_problems, reason="reconciliation"
+            )
+
+        if unreachable_problems:
             # An unreachable agent does not prove the workload is down. Keep the
             # stored state and surface the uncertainty instead of failing it.
-            await self._publish(deployment, "unknown", problems)
+            await self._publish(deployment, "unknown", unreachable_problems)
             return {
                 "deployment_id": deployment["id"],
                 "name": deployment["name"],
                 "status": "unknown",
-                "problems": problems,
+                "problems": unreachable_problems,
             }
-
-        if problems:
-            return await self._fail(deployment, problems, reason="reconciliation")
 
         for role in recipe.spec.roles:
             row = roles.get(role.name)

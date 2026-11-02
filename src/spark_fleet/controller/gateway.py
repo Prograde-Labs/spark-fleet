@@ -1,7 +1,8 @@
 """Fleet gateway: alias routing, primary routing, and inference accounting.
 
-The gateway builds a routing table from loaded deployments. Each deployment's
-first heavy role is its head; aliases and the served model name route to that
+The gateway builds a routing table from loaded deployments. The head is the
+heavy role that exposes an inference port, preferring a role named ``head`` and
+then the highest start order; aliases and the served model name route to that
 head's inference port. ``spark-active`` routes to the primary deployment and is
 served from the primary's served name. Unknown models return 404, loading
 deployments return 503 with a retry hint, and duplicate aliases are rejected.
@@ -213,9 +214,10 @@ class FleetGateway:
             heavy = [role for role in recipe.spec.roles if role.class_ == "heavy"]
             if recipe.spec.mode != "deployment" or not heavy:
                 continue
-            head = max(heavy, key=lambda role: (role.start_order, role.name == "head"))
-            if head.inference_port is None:
+            candidates = [role for role in heavy if role.inference_port is not None]
+            if not candidates:
                 continue
+            head = max(candidates, key=lambda role: (role.name == "head", role.start_order))
             node = self._db.get_node(head.node)
             if node is None:
                 continue

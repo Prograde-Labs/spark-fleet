@@ -109,13 +109,13 @@ def controller(tmp_path):
         pass
 
 
-def add_node(db, node_id="spark-01"):
+def add_node(db, node_id="spark-01", agent_url="http://192.0.2.239:8092"):
     db.upsert_node(
         node_id,
         display_name=node_id,
         lan_ip="192.0.2.239",
         fabric_ip="198.51.100.10",
-        agent_url="http://192.0.2.239:8092",
+        agent_url=agent_url,
     )
 
 
@@ -420,8 +420,8 @@ spec:
 
 
 async def test_reconcile_fails_on_definite_problem_despite_unreachable_agent(controller):
-    add_node(controller.db, "spark-01")
-    add_node(controller.db, "spark-02")
+    add_node(controller.db, "spark-01", "http://192.0.2.239:8092")
+    add_node(controller.db, "spark-02", "http://192.0.2.79:8092")
     recipe = parse_recipe_yaml(MULTI_RECIPE_YAML).model_dump(by_alias=True, exclude_unset=True)
     controller.db.create_deployment(
         "dep-1", "multi", "multi", "deployment", recipe, status="loaded"
@@ -443,3 +443,19 @@ async def test_reconcile_fails_on_definite_problem_despite_unreachable_agent(con
 
     assert results[0]["status"] == "failed"
     assert controller.db.get_deployment("dep-1")["status"] == "failed"
+
+
+async def test_poll_metrics_once_skips_disabled_nodes(controller):
+    controller.db.upsert_node(
+        "spark-off",
+        display_name="spark-off",
+        lan_ip="192.0.2.250",
+        fabric_ip="198.51.100.20",
+        agent_url="http://192.0.2.250:8092",
+        enabled=False,
+    )
+
+    errors = await controller.poll_metrics_once()
+
+    assert errors == {}
+    assert controller.metrics.latest_node_metrics("spark-off") == {}

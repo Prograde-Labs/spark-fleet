@@ -129,7 +129,10 @@ class DeploymentManager:
     async def unload(self, deployment_id: str) -> str:
         deployment = self._require_deployment(deployment_id)
         recipe = self._recipe(deployment)
-        self._validate_nodes(recipe)
+        known = {node.id for node in self._registry.list()}
+        missing = sorted({role.node for role in recipe.spec.roles if role.node not in known})
+        if missing:
+            raise DeploymentError(f"unknown node(s): {', '.join(missing)}")
         self._validate_projects(deployment, recipe)
         return await self._runner.submit(
             "deployment.unload",
@@ -212,7 +215,7 @@ class DeploymentManager:
             has_primary = any(
                 item["is_primary"]
                 for item in self._db.list_deployments()
-                if item["status"] == "loaded"
+                if item["status"] == "loaded" and item["mode"] == "deployment"
             )
             if recipe.spec.mode == "deployment" and (primary_requested or not has_primary):
                 self._db.set_primary(deployment_id)
@@ -241,6 +244,11 @@ class DeploymentManager:
                     self._db.update_deployment(deployment_id, status="failed", error="cancelled")
                     if deployment["is_primary"]:
                         self._db.clear_primary()
+            if displaced:
+                try:
+                    await self._rollback(displaced, clients, job)
+                except asyncio.CancelledError:
+                    pass
             raise
         except Exception as exc:
             error = str(exc)
@@ -287,6 +295,12 @@ class DeploymentManager:
         clients = _ClientPool(self._registry, self._token, self._client_factory)
         try:
             errors = await self._stop_roles(deployment, recipe, clients)
+        except Exception as exc:
+            message = str(exc)
+            self._db.update_deployment(deployment_id, status="failed", error=message)
+            if deployment["is_primary"]:
+                self._db.clear_primary()
+            raise DeploymentError(message) from exc
         finally:
             await clients.close()
 

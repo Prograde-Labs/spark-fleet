@@ -1390,3 +1390,35 @@ async def test_service_recipe_cannot_be_primary(db, registry, runner):
 
     with pytest.raises(DeploymentError, match="only deployment recipes can be primary"):
         await manager.load("dep-1", primary=True)
+
+
+async def test_unload_ignores_prepare_only_nodes(db, registry, runner):
+    registry.create(
+        "spark-03",
+        display_name="Spark 03",
+        lan_ip="192.0.2.240",
+        fabric_ip="198.51.100.12",
+        agent_url="http://192.0.2.240:8092",
+    )
+    recipe_obj = create_deployment(
+        db,
+        status="loaded",
+        recipe=recipe_dict(
+            prepare=[
+                {
+                    "name": "stage",
+                    "node": "spark-03",
+                    "image": "alpine:latest",
+                    "command": ["true"],
+                }
+            ]
+        ),
+    )
+    add_roles(db, "dep-1", recipe_obj)
+    registry.delete("spark-03")
+    manager = make_manager(db, registry, runner, agents_for())
+
+    job = await wait_job(db, await manager.unload("dep-1"), "succeeded")
+
+    assert job["status"] == "succeeded"
+    assert db.get_deployment("dep-1")["status"] == "unloaded"
