@@ -630,7 +630,6 @@ def test_published_port_shapes_are_claimed(port_entry):
         "9000-8000:9000-8000",
         "0:0",
         "70000:70000",
-        "1-5000:1-5000",
         "9000-abc:9000-abc",
         "abc",
         "1:2:3:4",
@@ -640,6 +639,7 @@ def test_published_port_shapes_are_claimed(port_entry):
         "[::1]:8080",
         "[::1]:9000:9000:9001",
         "[::1]:abc:9000:9000",
+        "[not-an-ip]:9000:9000",
         "not-an-ip:9000:9000",
         "9000:9000:9000",
         "9000:8000-9500",
@@ -967,3 +967,52 @@ def test_wide_container_port_range_allowed():
     recipe = parse_recipe(data)
 
     assert recipe.spec.roles[0].service.ports == ["8000-9500"]
+
+
+def test_host_range_with_single_container_port_allowed():
+    data = copy.deepcopy(SERVICE)
+    data["spec"]["roles"][0]["service"]["ports"] = ["9000-9005:8080", "8000-8999:9090"]
+
+    recipe = parse_recipe(data)
+
+    assert recipe.spec.roles[0].service.ports == ["9000-9005:8080", "8000-8999:9090"]
+
+
+def test_matching_host_and_container_ranges_allowed():
+    data = copy.deepcopy(SERVICE)
+    data["spec"]["roles"][0]["service"]["ports"] = ["9000-9005:8080-8085"]
+
+    recipe = parse_recipe(data)
+
+    assert recipe.spec.roles[0].service.ports == ["9000-9005:8080-8085"]
+
+
+def test_empty_bind_ip_allowed():
+    data = copy.deepcopy(SERVICE)
+    data["spec"]["roles"][0]["service"]["ports"] = [":9000:9000"]
+
+    recipe = parse_recipe(data)
+
+    assert recipe.spec.roles[0].service.ports == [":9000:9000"]
+
+
+def test_unbracketed_ipv6_bind_allowed():
+    data = copy.deepcopy(SERVICE)
+    data["spec"]["roles"][0]["service"]["ports"] = ["::1:9000:9000"]
+
+    recipe = parse_recipe(data)
+
+    assert recipe.spec.roles[0].service.ports == ["::1:9000:9000"]
+
+
+def test_same_port_on_different_bind_ips_conflicts():
+    data = copy.deepcopy(DEPLOYMENT)
+    for role in data["spec"]["roles"]:
+        role["class"] = "light"
+        role["node"] = "spark-01"
+        del role["inferencePort"]
+    data["spec"]["roles"][0]["service"]["ports"] = ["127.0.0.1:9000:9000"]
+    data["spec"]["roles"][1]["service"]["ports"] = ["192.0.2.79:9000:9000"]
+
+    with pytest.raises(RecipeError, match="duplicate port 9000"):
+        parse_recipe(data)

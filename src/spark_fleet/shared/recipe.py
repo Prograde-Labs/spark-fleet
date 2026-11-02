@@ -192,19 +192,28 @@ class Spec(StrictModel):
 
         names: set[str] = set()
         heavy_by_node: dict[str, str] = {}
-        ports_by_node: dict[tuple[str, int, str], str] = {}
+        ports_by_node: dict[tuple[str, str], list[tuple[str, int, int]]] = {}
 
         def claim_port(
-            node: str, port: int, role_name: str, label: str, protocol: str = "tcp"
+            node: str,
+            low: int,
+            high: int,
+            role_name: str,
+            label: str,
+            protocol: str = "tcp",
         ) -> None:
-            key = (node, port, protocol)
-            owner = ports_by_node.get(key)
-            if owner is not None and owner != role_name:
-                shown = f"{port}/{protocol}" if protocol != "tcp" else f"{port}"
+            claims = ports_by_node.setdefault((node, protocol), [])
+            for owner, owner_low, owner_high in claims:
+                if owner == role_name:
+                    continue
+                if high < owner_low or low > owner_high:
+                    continue
+                overlap = max(low, owner_low)
+                shown = f"{overlap}/{protocol}" if protocol != "tcp" else str(overlap)
                 raise ValueError(
                     f"duplicate {label} {shown} on node {node}: {owner} and {role_name}"
                 )
-            ports_by_node[key] = role_name
+            claims.append((role_name, low, high))
 
         for role in self.roles:
             if role.name in names:
@@ -220,9 +229,15 @@ class Spec(StrictModel):
                 heavy_by_node[role.node] = role.name
 
             if role.inference_port is not None:
-                claim_port(role.node, role.inference_port, role.name, "inference port")
-            for port, protocol in _published_ports(role.service):
-                claim_port(role.node, port, role.name, "port", protocol)
+                claim_port(
+                    role.node,
+                    role.inference_port,
+                    role.inference_port,
+                    role.name,
+                    "inference port",
+                )
+            for low, high, protocol in _published_ports(role.service):
+                claim_port(role.node, low, high, role.name, "port", protocol)
 
         if self.mode == "service":
             if len(self.roles) != 1:
@@ -253,29 +268,10 @@ class Recipe(StrictModel):
     spec: Spec
 
 
-_MAX_PORT_RANGE = 1024
-
-
 def _check_port(port: int, label: str) -> int:
     if not 1 <= port <= 65535:
         raise ValueError(f"{label} port out of range: {port}")
     return port
-
-
-def _expand_port_spec(spec: str, label: str) -> list[int]:
-    if "-" in spec:
-        start, _, end = spec.partition("-")
-        if not (start.isascii() and start.isdigit() and end.isascii() and end.isdigit()):
-            raise ValueError(f"invalid {label} port range: {spec!r}")
-        low, high = int(start), int(end)
-        if low > high:
-            raise ValueError(f"invalid {label} port range: {spec!r}")
-        if high - low + 1 > _MAX_PORT_RANGE:
-            raise ValueError(f"{label} port range too large: {spec!r}")
-        return [_check_port(port, label) for port in range(low, high + 1)]
-    if not (spec.isascii() and spec.isdigit()):
-        raise ValueError(f"invalid {label} port: {spec!r}")
-    return [_check_port(int(spec), label)]
 
 
 def _parse_port_range(spec: str, label: str) -> tuple[int, int]:
@@ -308,8 +304,8 @@ def _validate_bind_ip(value: str) -> None:
         raise ValueError(f"invalid bind address: {value!r}") from exc
 
 
-def _published_ports(service: ServiceSpec) -> list[tuple[int, str]]:
-    """Extract published host ports (and protocols) from Compose port syntax.
+def _published_ports(service: ServiceSpec) -> list[tuple[int, int, str]]:
+    """Extract published host port ranges (and protocols) from Compose syntax.
 
     Container-only entries (bare integers and ``"8080"``) are skipped because
     Compose assigns them an ephemeral host port; they cannot collide.
@@ -320,15 +316,14 @@ def _published_ports(service: ServiceSpec) -> list[tuple[int, str]]:
     a node is expected to expose a single published endpoint.
     """
 
-    ports: list[tuple[int, str]] = []
-    seen: set[tuple[int, str]] = set()
+    ranges: list[tuple[int, int, str]] = []
 
-    def add(port: int, protocol: str) -> None:
-        key = (port, protocol)
-        if key in seen:
-            raise ValueError(f"duplicate published port {port}/{protocol} in service")
-        seen.add(key)
-        ports.append(key)
+    def add(low: int, high: int, protocol: str) -> None:
+        for seen_low, seen_high, seen_protocol in ranges:
+            if seen_protocol == protocol and not (high < seen_low or low > seen_high):
+                overlap = max(low, seen_low)
+                raise ValueError(f"duplicate published port {overlap}/{protocol} in service")
+        ranges.append((low, high, protocol))
 
     for entry in service.ports:
         if isinstance(entry, dict):
@@ -356,15 +351,14 @@ def _published_ports(service: ServiceSpec) -> list[tuple[int, str]]:
             if isinstance(published, bool):
                 raise ValueError("published port must not be a boolean")
             if isinstance(published, int):
-                add(_check_port(published, "published"), protocol)
+                port = _check_port(published, "published")
+                add(port, port, protocol)
             elif isinstance(published, str):
-                for port in _expand_port_spec(published, "published"):
-                    add(port, protocol)
+                low, high = _parse_port_range(published, "published")
+                add(low, high, protocol)
             elif published is not None:
                 raise ValueError(f"invalid published port: {published!r}")
             continue
-        if isinstance(entry, bool):
-            raise ValueError("container port must not be a boolean")
         if isinstance(entry, int):
             _check_port(entry, "container")
             continue
@@ -385,8 +379,7 @@ def _published_ports(service: ServiceSpec) -> list[tuple[int, str]]:
             _validate_bind_ip(port_spec[1:closing])
             port_spec = port_spec[closing + 2 :]
         parts = port_spec.split(":")
-        max_parts = 2 if bracketed else 3
-        if len(parts) > max_parts:
+        if bracketed and len(parts) > 2:
             raise ValueError(f"invalid published port: {entry!r}")
         if len(parts) == 1:
             if bracketed:
@@ -396,8 +389,10 @@ def _published_ports(service: ServiceSpec) -> list[tuple[int, str]]:
         if len(parts) == 2:
             host, container = parts
         else:
-            bind_ip, host, container = parts
-            _validate_bind_ip(bind_ip)
+            bind_ip = ":".join(parts[:-2])
+            host, container = parts[-2], parts[-1]
+            if bind_ip:
+                _validate_bind_ip(bind_ip)
         if not container:
             raise ValueError(f"invalid published port: {entry!r}")
         container_low, container_high = _parse_port_range(container, "container")
@@ -405,13 +400,13 @@ def _published_ports(service: ServiceSpec) -> list[tuple[int, str]]:
             # Ephemeral host port (e.g. "127.0.0.1::8080").
             continue
         host_low, host_high = _parse_port_range(host, "published")
-        if host_high - host_low + 1 > _MAX_PORT_RANGE:
-            raise ValueError(f"published port range too large: {host!r}")
-        if host_high - host_low != container_high - container_low:
+        if (
+            container_low != container_high
+            and host_high - host_low != container_high - container_low
+        ):
             raise ValueError(f"host and container port ranges must match: {entry!r}")
-        for port in range(host_low, host_high + 1):
-            add(port, protocol)
-    return ports
+        add(host_low, host_high, protocol)
+    return ranges
 
 
 def _format_validation_error(exc: ValidationError) -> list[str]:
