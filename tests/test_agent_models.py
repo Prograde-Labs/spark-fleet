@@ -744,3 +744,31 @@ def test_job_manager_status_stays_responsive_during_removal(tmp_path, monkeypatc
 
     release_remove.set()
     remover.join(1)
+
+
+def test_job_manager_allows_start_after_removal_completes(tmp_path, monkeypatch):
+    root = tmp_path / "hub"
+    catalog = ModelCatalog([root])
+    manager = ModelJobManager(catalog)
+    remove_started = threading.Event()
+    release_remove = threading.Event()
+
+    def slow_remove(repo, **kwargs):
+        remove_started.set()
+        release_remove.wait(2)
+
+    monkeypatch.setattr(catalog, "remove", slow_remove)
+    monkeypatch.setattr(models, "snapshot_download", lambda *args, **kwargs: str(root))
+
+    remover = threading.Thread(target=manager.remove, args=("org/name",), kwargs={"confirm": True})
+    remover.start()
+    assert remove_started.wait(1)
+
+    with pytest.raises(ModelError, match="removal in progress"):
+        manager.start("org/name")
+
+    release_remove.set()
+    remover.join(1)
+
+    status = manager.wait(manager.start("org/name"), timeout=2)
+    assert status.state == "succeeded"
