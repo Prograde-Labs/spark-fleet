@@ -469,6 +469,33 @@ class Database:
         if cursor.rowcount == 0:
             raise KeyError(deployment_id)
 
+    def update_deployment_recipe(
+        self,
+        deployment_id: str,
+        recipe: Any,
+        *,
+        recipe_name: str | None = None,
+        mode: str | None = None,
+        now: float | None = None,
+    ) -> None:
+        now = time.time() if now is None else now
+        assignments = ["recipe_json = ?", "updated_at = ?"]
+        values: list[Any] = [_json_encode(recipe), now]
+        if recipe_name is not None:
+            assignments.append("recipe_name = ?")
+            values.append(recipe_name)
+        if mode is not None:
+            assignments.append("mode = ?")
+            values.append(mode)
+        values.append(deployment_id)
+        with self._lock, self._conn:
+            cursor = self._conn.execute(
+                f"UPDATE deployments SET {', '.join(assignments)} WHERE id = ?",
+                tuple(values),
+            )
+            if cursor.rowcount == 0:
+                raise KeyError(deployment_id)
+
     def set_primary(self, deployment_id: str, now: float | None = None) -> None:
         now = time.time() if now is None else now
         with self._lock, self._conn:

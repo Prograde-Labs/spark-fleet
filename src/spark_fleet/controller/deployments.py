@@ -44,6 +44,7 @@ ClientFactory = Callable[[str, str], AgentClient]
 ReadinessChecker = Callable[[RoleSpec, Node, str, AgentClient, str | None], Awaitable[None]]
 
 GLOBAL_LOCK = "deployment:global"
+_PROJECT_RE = re.compile(r"[a-z0-9][a-z0-9_-]{0,62}")
 
 
 class DeploymentError(RuntimeError):
@@ -97,21 +98,37 @@ class DeploymentManager:
             locks=self._locks(deployment_id, recipe),
         )
 
-    async def redeploy(self, deployment_id: str, *, primary: bool = False) -> str:
+    async def redeploy(
+        self,
+        deployment_id: str,
+        *,
+        primary: bool = False,
+        recipe: Recipe | None = None,
+    ) -> str:
         deployment = self._require_deployment(deployment_id)
-        recipe = self._recipe(deployment)
-        self._validate_load(deployment, recipe, allow_loaded=True)
+        if recipe is not None:
+            self._validate_load(deployment, recipe, allow_loaded=True)
+            self._db.update_deployment_recipe(
+                deployment_id,
+                recipe.model_dump(by_alias=True, exclude_unset=True),
+                recipe_name=recipe.metadata.name,
+                mode=recipe.spec.mode,
+            )
+            deployment = self._require_deployment(deployment_id)
+        current = recipe if recipe is not None else self._recipe(deployment)
+        self._validate_load(deployment, current, allow_loaded=True)
         return await self._runner.submit(
             "deployment.redeploy",
             {"deployment_id": deployment_id, "primary": primary},
             deployment_id=deployment_id,
-            locks=self._locks(deployment_id, recipe),
+            locks=self._locks(deployment_id, current),
         )
 
     async def unload(self, deployment_id: str) -> str:
         deployment = self._require_deployment(deployment_id)
         recipe = self._recipe(deployment)
         self._validate_nodes(recipe)
+        self._validate_projects(deployment, recipe)
         return await self._runner.submit(
             "deployment.unload",
             {"deployment_id": deployment_id},
@@ -121,6 +138,8 @@ class DeploymentManager:
 
     def is_stale(self, deployment_id: str, recipe: Recipe) -> bool:
         deployment = self._require_deployment(deployment_id)
+        if deployment["status"] != "loaded":
+            return False
         stored = deployment.get("recipe")
         current = recipe.model_dump(by_alias=True, exclude_unset=True)
         return _canonical(stored) != _canonical(current)
@@ -134,16 +153,24 @@ class DeploymentManager:
             raise DeploymentError("deployment id is required")
         deployment = self._require_deployment(deployment_id)
         recipe = self._recipe(deployment)
-        self._validate_load(deployment, recipe, allow_loaded=True)
+        self._validate_load(
+            deployment,
+            recipe,
+            allow_loaded=job.kind == "deployment.redeploy",
+        )
         primary_requested = bool(payload.get("primary"))
 
         clients = _ClientPool(self._registry, self._token, self._client_factory)
         started: list[tuple[RoleSpec, str, AgentClient]] = []
         displaced: list[tuple[dict[str, Any], bool]] = []
         try:
+            await self._validate_models(recipe, clients)
+
             if deployment["status"] == "loaded":
                 self._event(job, "stopping current roles", phase="stop")
-                await self._stop_roles(deployment, recipe, clients)
+                errors = await self._stop_roles(deployment, recipe, clients)
+                if errors:
+                    raise DeploymentError("; ".join(errors))
 
             displaced = [
                 (other, other["is_primary"]) for other in self._conflicts(deployment_id, recipe)
@@ -159,13 +186,33 @@ class DeploymentManager:
             await self._start_roles(recipe, deployment, clients, job, started)
 
             self._db.update_deployment(
-                deployment_id, status="loaded", error=None, loaded_at=self._clock()
+                deployment_id, status="loaded", error=None, loaded_at=time.time()
             )
             has_primary = any(item["is_primary"] for item in self._db.list_deployments())
             if primary_requested or not has_primary:
                 self._db.set_primary(deployment_id)
             self._event(job, "deployment loaded", phase="loaded")
             return {"deployment_id": deployment_id, "status": "loaded"}
+        except asyncio.CancelledError:
+            self._event(job, "deployment cancelled", level="error", phase="cancelled")
+            for role in recipe.spec.roles:
+                self._db.upsert_role(
+                    deployment_id,
+                    role.name,
+                    role.node,
+                    role.class_,
+                    role.start_order,
+                    status="stopped",
+                )
+            self._db.update_deployment(deployment_id, status="failed", error="cancelled")
+            if deployment["is_primary"]:
+                self._db.clear_primary()
+            cleanup = asyncio.create_task(self._stop_started(deployment_id, started))
+            try:
+                await asyncio.wait_for(asyncio.shield(cleanup), timeout=5.0)
+            except (TimeoutError, asyncio.CancelledError):
+                pass
+            raise
         except Exception as exc:
             error = str(exc)
             self._event(job, f"deployment failed: {error}", level="error", phase="failed")
@@ -180,6 +227,8 @@ class DeploymentManager:
                     status="stopped",
                 )
             self._db.update_deployment(deployment_id, status="failed", error=error)
+            if deployment["is_primary"]:
+                self._db.clear_primary()
             rollback_errors = await self._rollback(displaced, clients, job)
             if rollback_errors:
                 error = f"{error}; rollback: {'; '.join(rollback_errors)}"
@@ -388,7 +437,7 @@ class DeploymentManager:
                 await self._run_prepare(recipe, deployment, clients, job)
                 await self._start_roles(recipe, deployment, clients, job, rollback_started)
                 self._db.update_deployment(
-                    deployment["id"], status="loaded", error=None, loaded_at=self._clock()
+                    deployment["id"], status="loaded", error=None, loaded_at=time.time()
                 )
                 if was_primary:
                     self._db.set_primary(deployment["id"])
@@ -429,7 +478,17 @@ class DeploymentManager:
                 try:
                     status = await client.job_status(job_id)
                 except AgentError as exc:
+                    try:
+                        await client.cancel_job(job_id)
+                    except AgentError:
+                        pass
                     raise DeploymentError(f"prepare {prepare.name} status failed: {exc}") from exc
+                except asyncio.CancelledError:
+                    try:
+                        await asyncio.shield(client.cancel_job(job_id))
+                    except (AgentError, asyncio.CancelledError):
+                        pass
+                    raise
                 state = status.get("state") if isinstance(status, Mapping) else None
                 if state == "succeeded":
                     break
@@ -444,7 +503,14 @@ class DeploymentManager:
                     raise DeploymentError(
                         f"prepare {prepare.name} timed out after {prepare.timeout_seconds}s"
                     )
-                await self._sleep(self._prepare_poll_interval)
+                try:
+                    await self._sleep(self._prepare_poll_interval)
+                except asyncio.CancelledError:
+                    try:
+                        await asyncio.shield(client.cancel_job(job_id))
+                    except (AgentError, asyncio.CancelledError):
+                        pass
+                    raise
 
     # Validation and helpers ----------------------------------------------
 
@@ -468,10 +534,44 @@ class DeploymentManager:
         except RecipeError as exc:
             raise DeploymentError(str(exc)) from exc
 
+    def _validate_projects(self, deployment: Mapping[str, Any], recipe: Recipe) -> None:
+        for role in recipe.spec.roles:
+            project = _project_name(deployment["name"], role.name)
+            if not _PROJECT_RE.fullmatch(project):
+                raise DeploymentError(
+                    f"project name {project!r} is too long or invalid; "
+                    "shorten the deployment or role name"
+                )
+
+    async def _validate_models(self, recipe: Recipe, clients: _ClientPool) -> None:
+        model = recipe.spec.model
+        if model is None:
+            return
+        repos = {model.repo, *model.extra_repos}
+        nodes = sorted({role.node for role in recipe.spec.roles})
+        for node_id in nodes:
+            client = await clients.get(node_id)
+            try:
+                catalog = await client.models()
+            except AgentError as exc:
+                raise DeploymentError(f"could not read model catalog on {node_id}: {exc}") from exc
+            entries = catalog.get("models") if isinstance(catalog, Mapping) else None
+            cached = {
+                entry["repo"]
+                for entry in entries or ()
+                if isinstance(entry, Mapping)
+                and entry.get("cached") is True
+                and isinstance(entry.get("repo"), str)
+            }
+            missing = sorted(repos - cached)
+            if missing:
+                raise DeploymentError(f"model(s) not cached on {node_id}: {', '.join(missing)}")
+
     def _validate_load(
         self, deployment: Mapping[str, Any], recipe: Recipe, *, allow_loaded: bool
     ) -> None:
         self._validate_nodes(recipe)
+        self._validate_projects(deployment, recipe)
         if not allow_loaded and deployment["status"] == "loaded":
             raise DeploymentError(f"deployment {deployment['name']} is already loaded")
         aliases = _recipe_aliases(recipe)
@@ -638,7 +738,7 @@ async def _probe(
         return any(status.get("state") == "running" for status in statuses)
     if readiness.type == "container-health":
         statuses = await client.compose_status(project)
-        return any(status.get("health") == "healthy" for status in statuses)
+        return any(_container_healthy(status) for status in statuses)
     if readiness.type == "http":
         port = readiness.port or role.inference_port
         if port is None:
@@ -673,6 +773,14 @@ async def _consume_logs(client: AgentClient, container_id: str, pattern: re.Patt
         if pattern.search(line):
             return True
     return False
+
+
+def _container_healthy(status: Mapping[str, Any]) -> bool:
+    health = status.get("health")
+    if health == "healthy":
+        return True
+    status_text = status.get("status")
+    return isinstance(status_text, str) and "(healthy)" in status_text
 
 
 async def _default_http_probe(url: str, timeout: float) -> int:
