@@ -178,6 +178,16 @@ export const api = {
       request(`/api/deployments/${encodeURIComponent(id)}/primary`, {
         method: 'POST',
       }),
+    roleLogs: (id, role, tail = 200) =>
+      request(
+        `/api/deployments/${encodeURIComponent(id)}/roles/${encodeURIComponent(role)}/logs${query(
+          { tail },
+        )}`,
+      ),
+    roleLogStreamUrl: (id, role, tail = 200) =>
+      `/api/deployments/${encodeURIComponent(id)}/roles/${encodeURIComponent(role)}/logs/stream${query(
+        { tail },
+      )}`,
   },
 
   models: {

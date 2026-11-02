@@ -122,6 +122,19 @@ class FakeAgentClient:
         }
         return "dl-job"
 
+    async def container_logs(self, container_id, *, tail=200):
+        self.calls.append("container_logs")
+        if STATE.get("logs_error"):
+            raise AgentError("logs unavailable")
+        STATE["logs"] = {"container_id": container_id, "tail": tail}
+        return "line one\nline two"
+
+    async def follow_container_logs(self, container_id, *, tail=200):
+        self.calls.append("follow_logs")
+        STATE["follow"] = {"container_id": container_id, "tail": tail}
+        for line in ("stream one\n", "stream two\n"):
+            yield line
+
     async def remove_model(self, repo, *, root=None, confirm=False, in_use=()):
         self.calls.append("remove")
         if STATE.get("remove_error"):
@@ -1088,3 +1101,63 @@ def test_redeploy_falls_back_when_recipe_file_is_not_utf8(env):
 
     assert response.status_code == 200
     assert env.deployments.calls[-1][3].metadata.name == "glm"
+
+
+def add_role(db, deployment_id="dep-1", role_name="head", node_id="spark-01", container_id="c1"):
+    db.upsert_role(
+        deployment_id,
+        role_name,
+        node_id,
+        "heavy",
+        20,
+        status="running",
+        container_id=container_id,
+    )
+
+
+def test_role_logs_snapshot(env):
+    add_node(env.client)
+    add_deployment(env.db, status="loaded")
+    add_role(env.db)
+
+    response = env.client.get("/api/deployments/dep-1/roles/head/logs?tail=50")
+
+    assert response.status_code == 200
+    assert response.json()["logs"] == "line one\nline two"
+    assert STATE["logs"] == {"container_id": "c1", "tail": 50}
+
+
+def test_role_logs_reports_agent_failure(env):
+    add_node(env.client)
+    add_deployment(env.db, status="loaded")
+    add_role(env.db)
+    STATE["logs_error"] = True
+
+    response = env.client.get("/api/deployments/dep-1/roles/head/logs")
+
+    assert response.status_code == 502
+    assert response.json()["detail"] == "logs unavailable"
+
+
+def test_role_logs_missing_role_and_container(env):
+    add_node(env.client)
+    add_deployment(env.db, status="loaded")
+
+    missing = env.client.get("/api/deployments/dep-1/roles/worker/logs")
+    assert missing.status_code == 404
+
+    add_role(env.db, container_id=None)
+    no_container = env.client.get("/api/deployments/dep-1/roles/head/logs")
+    assert no_container.status_code == 400
+
+
+def test_role_log_stream(env):
+    add_node(env.client)
+    add_deployment(env.db, status="loaded")
+    add_role(env.db)
+
+    response = env.client.get("/api/deployments/dep-1/roles/head/logs/stream")
+
+    assert response.status_code == 200
+    assert response.text == "stream one\nstream two\n"
+    assert STATE["follow"] == {"container_id": "c1", "tail": 200}

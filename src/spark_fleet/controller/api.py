@@ -344,6 +344,57 @@ def build_app(
             raise HTTPException(status_code=400, detail=str(exc)) from exc
         return {"job_id": job_id}
 
+    @app.get(
+        "/api/deployments/{deployment_id}/roles/{role_name}/logs",
+        dependencies=[Depends(session_dep)],
+    )
+    async def role_logs(
+        deployment_id: str,
+        role_name: str,
+        tail: int = Query(200, ge=1, le=5000),
+    ) -> dict[str, Any]:
+        role, node = _role_and_node(db, registry, deployment_id, role_name)
+        container_id = role.get("container_id")
+        if not isinstance(container_id, str) or not container_id:
+            raise HTTPException(status_code=400, detail="role has no container")
+        client = client_factory(node.agent_url, agent_token)
+        try:
+            text = await client.container_logs(container_id, tail=tail)
+        except AgentError as exc:
+            raise HTTPException(status_code=502, detail=str(exc)) from exc
+        finally:
+            await client.aclose()
+        return {
+            "deployment_id": deployment_id,
+            "role": role_name,
+            "node_id": node.id,
+            "logs": text,
+        }
+
+    @app.get(
+        "/api/deployments/{deployment_id}/roles/{role_name}/logs/stream",
+        dependencies=[Depends(session_dep)],
+    )
+    async def role_log_stream(
+        deployment_id: str,
+        role_name: str,
+        tail: int = Query(200, ge=1, le=5000),
+    ) -> StreamingResponse:
+        role, node = _role_and_node(db, registry, deployment_id, role_name)
+        container_id = role.get("container_id")
+        if not isinstance(container_id, str) or not container_id:
+            raise HTTPException(status_code=400, detail="role has no container")
+        client = client_factory(node.agent_url, agent_token)
+
+        async def stream():
+            try:
+                async for line in client.follow_container_logs(container_id, tail=tail):
+                    yield line
+            finally:
+                await client.aclose()
+
+        return StreamingResponse(stream(), media_type="text/plain")
+
     @app.post("/api/deployments/{deployment_id}/primary", dependencies=[Depends(mutation_dep)])
     def set_primary(deployment_id: str) -> dict[str, Any]:
         deployment = db.get_deployment(deployment_id)
@@ -624,6 +675,27 @@ def build_app(
         )
 
     return app
+
+
+def _role_and_node(
+    db: Database,
+    registry: NodeRegistry,
+    deployment_id: str,
+    role_name: str,
+):
+    if db.get_deployment(deployment_id) is None:
+        raise HTTPException(status_code=404, detail="deployment not found")
+    role = next(
+        (item for item in db.list_roles(deployment_id) if item["role_name"] == role_name),
+        None,
+    )
+    if role is None:
+        raise HTTPException(status_code=404, detail="role not found")
+    try:
+        node = registry.require(role["node_id"])
+    except NodeError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    return role, node
 
 
 def _node_dict(node) -> dict[str, Any]:
