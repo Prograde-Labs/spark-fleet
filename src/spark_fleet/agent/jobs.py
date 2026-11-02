@@ -14,6 +14,7 @@ import subprocess
 import threading
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
+from typing import Any
 
 from spark_fleet.agent import docker_ops
 from spark_fleet.shared.render import LABEL_DEPLOYMENT, LABEL_RECIPE, LABEL_ROLE
@@ -70,6 +71,27 @@ class OneShotJob:
     @property
     def running(self) -> bool:
         return self._process.poll() is None
+
+    def snapshot(self) -> dict[str, Any]:
+        """Return the current state without waiting for completion."""
+
+        exit_code = self._process.poll()
+        if exit_code is None:
+            state = "running"
+        elif self._cancelled:
+            state = "cancelled"
+        elif exit_code == 0:
+            state = "succeeded"
+        else:
+            state = "failed"
+        return {
+            "job_id": self._name,
+            "name": self._name,
+            "state": state,
+            "exit_code": exit_code,
+            "logs": "".join(tuple(self._chunks)),
+            "cancelled": self._cancelled,
+        }
 
     def cancel(self) -> None:
         """Terminate the CLI process and force-remove its container."""
@@ -208,6 +230,15 @@ class JobManager:
 
     def active(self) -> list[str]:
         return sorted(name for name, job in self._jobs.items() if job.running)
+
+    def status(self, name: str) -> dict[str, Any]:
+        job = self._jobs.get(name)
+        if job is None:
+            raise JobError(f"unknown job: {name}")
+        return job.snapshot()
+
+    def list(self) -> list[dict[str, Any]]:
+        return [job.snapshot() for job in self._jobs.values()]
 
     def cancel(self, name: str) -> bool:
         job = self._jobs.get(name)
