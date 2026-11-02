@@ -2,6 +2,7 @@
 
 import io
 import subprocess
+import sys
 
 import pytest
 
@@ -249,6 +250,27 @@ def test_wait_returns_exit_code_and_logs(monkeypatch):
         cancelled=False,
         timed_out=False,
     )
+
+
+def test_wait_drains_output_larger_than_pipe_buffer(monkeypatch):
+    real_popen = subprocess.Popen
+
+    def fake_popen(args, **kwargs):
+        del args
+        return real_popen(
+            [sys.executable, "-c", "import sys; sys.stdout.write('x' * 300000)"],
+            **kwargs,
+        )
+
+    monkeypatch.setattr("spark_fleet.agent.jobs.subprocess.Popen", fake_popen)
+
+    job = start_job("stage", "alpine:latest", ["true"], labels=LABELS)
+    result = job.wait(timeout=10)
+
+    assert result.exit_code == 0
+    assert result.cancelled is False
+    assert result.timed_out is False
+    assert len(result.logs) == 300_000
 
 
 def test_cancel_terminates_process_and_removes_container(monkeypatch):
