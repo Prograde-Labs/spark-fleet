@@ -1016,3 +1016,47 @@ def test_same_port_on_different_bind_ips_conflicts():
 
     with pytest.raises(RecipeError, match="duplicate port 9000"):
         parse_recipe(data)
+
+
+def test_host_range_wider_than_1024_allowed():
+    data = copy.deepcopy(SERVICE)
+    data["spec"]["roles"][0]["service"]["ports"] = ["8000-9500:8080"]
+
+    recipe = parse_recipe(data)
+
+    assert recipe.spec.roles[0].service.ports == ["8000-9500:8080"]
+
+
+def test_wide_long_form_published_range_allowed():
+    data = copy.deepcopy(SERVICE)
+    data["spec"]["roles"][0]["service"]["ports"] = [{"target": 8080, "published": "8000-9500"}]
+
+    recipe = parse_recipe(data)
+
+    assert recipe.spec.roles[0].service.ports == [{"target": 8080, "published": "8000-9500"}]
+
+
+def test_partially_overlapping_ranges_across_roles_rejected():
+    data = copy.deepcopy(DEPLOYMENT)
+    for role in data["spec"]["roles"]:
+        role["class"] = "light"
+        role["node"] = "spark-01"
+        del role["inferencePort"]
+    data["spec"]["roles"][0]["service"]["ports"] = ["9000-9005:8080"]
+    data["spec"]["roles"][1]["service"]["ports"] = ["9004-9010:8081"]
+
+    with pytest.raises(RecipeError, match="duplicate port 9004"):
+        parse_recipe(data)
+
+
+def test_host_range_claim_covers_entire_range():
+    data = copy.deepcopy(DEPLOYMENT)
+    for role in data["spec"]["roles"]:
+        role["class"] = "light"
+        role["node"] = "spark-01"
+        del role["inferencePort"]
+    data["spec"]["roles"][0]["service"]["ports"] = ["9000-9005:8080"]
+    data["spec"]["roles"][1]["service"]["ports"] = ["9005:9005"]
+
+    with pytest.raises(RecipeError, match="duplicate port 9005"):
+        parse_recipe(data)
