@@ -452,6 +452,60 @@ def build_app(
                 await client.aclose()
         return {"jobs": jobs}
 
+    @app.get("/api/models/jobs", dependencies=[Depends(session_dep)])
+    async def list_model_jobs(node_id: str | None = None) -> dict[str, Any]:
+        if node_id is not None:
+            try:
+                nodes = [registry.require(node_id)]
+            except NodeError as exc:
+                raise HTTPException(status_code=404, detail=str(exc)) from exc
+        else:
+            nodes = registry.list()
+        results: list[dict[str, Any]] = []
+        for node in nodes:
+            client = client_factory(node.agent_url, agent_token)
+            try:
+                jobs = await client.list_model_jobs()
+                results.append({"node_id": node.id, "jobs": jobs})
+            except AgentError as exc:
+                results.append({"node_id": node.id, "error": str(exc)})
+            finally:
+                await client.aclose()
+        return {"nodes": results}
+
+    @app.get("/api/models/jobs/{node_id}/{job_id}", dependencies=[Depends(session_dep)])
+    async def get_model_job(node_id: str, job_id: str) -> dict[str, Any]:
+        try:
+            node = registry.require(node_id)
+        except NodeError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        client = client_factory(node.agent_url, agent_token)
+        try:
+            job = await client.model_job(job_id)
+        except AgentError as exc:
+            raise HTTPException(status_code=502, detail=str(exc)) from exc
+        finally:
+            await client.aclose()
+        return {"node_id": node.id, "job": job}
+
+    @app.post(
+        "/api/models/jobs/{node_id}/{job_id}/cancel",
+        dependencies=[Depends(mutation_dep)],
+    )
+    async def cancel_model_job(node_id: str, job_id: str) -> dict[str, Any]:
+        try:
+            node = registry.require(node_id)
+        except NodeError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        client = client_factory(node.agent_url, agent_token)
+        try:
+            cancelled = await client.cancel_model_job(job_id)
+        except AgentError as exc:
+            raise HTTPException(status_code=502, detail=str(exc)) from exc
+        finally:
+            await client.aclose()
+        return {"cancelled": cancelled}
+
     @app.delete("/api/models/{repo:path}", dependencies=[Depends(mutation_dep)])
     async def remove_model(
         repo: str,

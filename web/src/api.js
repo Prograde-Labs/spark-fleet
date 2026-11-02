@@ -194,6 +194,17 @@ export const api = {
     list: () => request('/api/models'),
     download: (body) =>
       request('/api/models/download', { method: 'POST', body }),
+    jobs: (nodeId = null) =>
+      request(`/api/models/jobs${query({ node_id: nodeId })}`),
+    job: (nodeId, jobId) =>
+      request(
+        `/api/models/jobs/${encodeURIComponent(nodeId)}/${encodeURIComponent(jobId)}`,
+      ),
+    cancelJob: (nodeId, jobId) =>
+      request(
+        `/api/models/jobs/${encodeURIComponent(nodeId)}/${encodeURIComponent(jobId)}/cancel`,
+        { method: 'POST' },
+      ),
     remove: (repo, { nodeId, root, confirm = true } = {}) =>
       request(
         `/api/models/${encodePath(repo)}${query({

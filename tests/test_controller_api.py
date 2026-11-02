@@ -135,6 +135,20 @@ class FakeAgentClient:
         for line in ("stream one\n", "stream two\n"):
             yield line
 
+    async def list_model_jobs(self):
+        self.calls.append("model_jobs")
+        if STATE.get("model_jobs_error"):
+            raise AgentError("jobs unavailable")
+        return STATE.get("model_jobs", [])
+
+    async def model_job(self, job_id):
+        self.calls.append("model_job")
+        return STATE.get("model_job", {"id": job_id, "state": "running"})
+
+    async def cancel_model_job(self, job_id):
+        self.calls.append("model_job_cancel")
+        return STATE.get("model_job_cancel", True)
+
     async def remove_model(self, repo, *, root=None, confirm=False, in_use=()):
         self.calls.append("remove")
         if STATE.get("remove_error"):
@@ -1161,3 +1175,35 @@ def test_role_log_stream(env):
     assert response.status_code == 200
     assert response.text == "stream one\nstream two\n"
     assert STATE["follow"] == {"container_id": "c1", "tail": 200}
+
+
+def test_model_jobs_list_all_nodes(env):
+    add_node(env.client, "spark-01")
+    add_node(env.client, "spark-02", "192.0.2.79")
+    STATE["model_jobs"] = [{"id": "job-1", "repo": "org/model", "state": "running"}]
+
+    body = env.client.get("/api/models/jobs").json()
+
+    assert [item["node_id"] for item in body["nodes"]] == ["spark-01", "spark-02"]
+    assert body["nodes"][0]["jobs"][0]["id"] == "job-1"
+
+
+def test_model_jobs_filter_and_errors(env):
+    add_node(env.client)
+    STATE["model_jobs_error"] = True
+
+    body = env.client.get("/api/models/jobs", params={"node_id": "spark-01"}).json()
+    assert body["nodes"][0]["error"] == "jobs unavailable"
+
+    assert env.client.get("/api/models/jobs", params={"node_id": "nope"}).status_code == 404
+
+
+def test_model_job_get_and_cancel(env):
+    add_node(env.client)
+
+    fetched = env.client.get("/api/models/jobs/spark-01/job-1")
+    cancelled = env.client.post("/api/models/jobs/spark-01/job-1/cancel")
+
+    assert fetched.status_code == 200
+    assert fetched.json()["job"]["id"] == "job-1"
+    assert cancelled.json() == {"cancelled": True}

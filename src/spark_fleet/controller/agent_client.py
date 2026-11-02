@@ -159,6 +159,10 @@ class AgentClient:
         )
         return _require_str(payload, "job_id", "model download")
 
+    async def list_model_jobs(self) -> list[dict[str, Any]]:
+        payload = await self._request("GET", "/models/jobs")
+        return _require_list(payload, "jobs", "model jobs")
+
     async def model_job(self, job_id: str) -> dict[str, Any]:
         return await self._request("GET", f"/models/jobs/{_quote(job_id)}")
 
