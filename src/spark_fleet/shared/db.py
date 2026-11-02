@@ -17,6 +17,7 @@ from pathlib import Path
 from typing import Any
 
 SCHEMA_VERSION = 1
+_UNSET = object()
 
 
 class DatabaseError(RuntimeError):
@@ -69,7 +70,7 @@ CREATE TABLE jobs (
     id TEXT PRIMARY KEY,
     kind TEXT NOT NULL,
     status TEXT NOT NULL,
-    deployment_id TEXT,
+    deployment_id TEXT REFERENCES deployments(id) ON DELETE SET NULL,
     payload_json TEXT,
     result_json TEXT,
     error TEXT,
@@ -100,7 +101,7 @@ CREATE INDEX idx_node_metrics ON node_metrics(node_id, metric, ts);
 
 CREATE TABLE inference_samples (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
-    deployment_id TEXT NOT NULL,
+    deployment_id TEXT NOT NULL REFERENCES deployments(id) ON DELETE CASCADE,
     ts REAL NOT NULL,
     requests INTEGER NOT NULL DEFAULT 0,
     errors INTEGER NOT NULL DEFAULT 0,
@@ -131,6 +132,12 @@ def _json_decode(value: str | None) -> Any:
     return json.loads(value)
 
 
+def _validate_limit(limit: int) -> int:
+    if limit < 0:
+        raise ValueError("limit must not be negative")
+    return limit
+
+
 class Database:
     """A thread-safe SQLite store shared by controller components."""
 
@@ -143,27 +150,51 @@ class Database:
 
         self._conn = sqlite3.connect(self.path, check_same_thread=False)
         self._conn.row_factory = sqlite3.Row
+        self._conn.execute("PRAGMA busy_timeout = 5000")
         self._conn.execute("PRAGMA foreign_keys = ON")
         if self.path != ":memory:":
-            self._conn.execute("PRAGMA journal_mode = WAL")
+            # auto_vacuum must be set before the database header is written.
             self._conn.execute("PRAGMA auto_vacuum = INCREMENTAL")
-        self._migrate()
+            self._conn.execute("PRAGMA journal_mode = WAL")
+        try:
+            self._migrate()
+        except Exception:
+            self._conn.close()
+            raise
 
     def _migrate(self) -> None:
-        with self._lock, self._conn:
-            version = self._conn.execute("PRAGMA user_version").fetchone()[0]
-            if version > SCHEMA_VERSION:
-                raise DatabaseError(
-                    f"database schema version {version} is newer than supported {SCHEMA_VERSION}"
-                )
-            if version < 1:
-                self._conn.executescript(_SCHEMA_V1)
-                self._conn.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
+        with self._lock:
+            try:
+                self._conn.execute("BEGIN IMMEDIATE")
+                version = self._conn.execute("PRAGMA user_version").fetchone()[0]
+                if version > SCHEMA_VERSION:
+                    raise DatabaseError(
+                        f"database schema version {version} is newer than supported "
+                        f"{SCHEMA_VERSION}"
+                    )
+                if version < 1:
+                    for statement in _SCHEMA_V1.split(";"):
+                        statement = statement.strip()
+                        if statement:
+                            self._conn.execute(statement)
+                    self._conn.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
+                self._conn.commit()
+            except DatabaseError:
+                self._conn.rollback()
+                raise
+            except sqlite3.Error as exc:
+                self._conn.rollback()
+                raise DatabaseError(f"database migration failed: {exc}") from exc
 
     @property
     def schema_version(self) -> int:
         with self._lock:
             return int(self._conn.execute("PRAGMA user_version").fetchone()[0])
+
+    @property
+    def auto_vacuum_mode(self) -> int:
+        with self._lock:
+            return int(self._conn.execute("PRAGMA auto_vacuum").fetchone()[0])
 
     # Nodes -----------------------------------------------------------------
 
@@ -176,11 +207,18 @@ class Database:
         fabric_ip: str,
         agent_url: str,
         enabled: bool = True,
-        info: Any = None,
+        info: Any = _UNSET,
         now: float | None = None,
     ) -> None:
         now = time.time() if now is None else now
         with self._lock, self._conn:
+            if info is _UNSET:
+                row = self._conn.execute(
+                    "SELECT info_json FROM nodes WHERE id = ?", (node_id,)
+                ).fetchone()
+                info_json = row["info_json"] if row else None
+            else:
+                info_json = _json_encode(info)
             self._conn.execute(
                 """
                 INSERT INTO nodes (
@@ -194,7 +232,7 @@ class Database:
                     agent_url = excluded.agent_url,
                     enabled = excluded.enabled,
                     updated_at = excluded.updated_at,
-                    info_json = COALESCE(excluded.info_json, nodes.info_json)
+                    info_json = excluded.info_json
                 """,
                 (
                     node_id,
@@ -205,7 +243,7 @@ class Database:
                     int(enabled),
                     now,
                     now,
-                    _json_encode(info),
+                    info_json,
                 ),
             )
 
@@ -229,6 +267,11 @@ class Database:
 
     def delete_node(self, node_id: str) -> None:
         with self._lock, self._conn:
+            references = self._conn.execute(
+                "SELECT COUNT(*) FROM deployment_roles WHERE node_id = ?", (node_id,)
+            ).fetchone()[0]
+            if references:
+                raise DatabaseError(f"node {node_id} is referenced by deployment roles")
             self._conn.execute("DELETE FROM nodes WHERE id = ?", (node_id,))
 
     @staticmethod
@@ -267,7 +310,7 @@ class Database:
         deployment_id: str,
         *,
         status: str | None = None,
-        error: str | None = None,
+        error: str | None | object = _UNSET,
         loaded_at: float | None = None,
         now: float | None = None,
     ) -> None:
@@ -277,7 +320,7 @@ class Database:
         if status is not None:
             assignments.append("status = ?")
             values.append(status)
-        if error is not None:
+        if error is not _UNSET:
             assignments.append("error = ?")
             values.append(error)
         if loaded_at is not None:
@@ -346,35 +389,51 @@ class Database:
         start_order: int,
         *,
         config_hash: str | None = None,
-        status: str = "pending",
+        status: str | None = None,
         container_id: str | None = None,
     ) -> None:
         with self._lock, self._conn:
-            self._conn.execute(
+            cursor = self._conn.execute(
                 """
-                INSERT INTO deployment_roles (
-                    deployment_id, role_name, node_id, "class", start_order,
-                    config_hash, status, container_id
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-                ON CONFLICT(deployment_id, role_name) DO UPDATE SET
-                    node_id = excluded.node_id,
-                    "class" = excluded."class",
-                    start_order = excluded.start_order,
-                    config_hash = COALESCE(excluded.config_hash, deployment_roles.config_hash),
-                    status = excluded.status,
-                    container_id = COALESCE(excluded.container_id, deployment_roles.container_id)
+                UPDATE deployment_roles SET
+                    node_id = ?,
+                    "class" = ?,
+                    start_order = ?,
+                    config_hash = COALESCE(?, config_hash),
+                    status = COALESCE(?, status),
+                    container_id = COALESCE(?, container_id)
+                WHERE deployment_id = ? AND role_name = ?
                 """,
                 (
-                    deployment_id,
-                    role_name,
                     node_id,
                     role_class,
                     start_order,
                     config_hash,
                     status,
                     container_id,
+                    deployment_id,
+                    role_name,
                 ),
             )
+            if cursor.rowcount == 0:
+                self._conn.execute(
+                    """
+                    INSERT INTO deployment_roles (
+                        deployment_id, role_name, node_id, "class", start_order,
+                        config_hash, status, container_id
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        deployment_id,
+                        role_name,
+                        node_id,
+                        role_class,
+                        start_order,
+                        config_hash,
+                        status or "pending",
+                        container_id,
+                    ),
+                )
 
     def list_roles(self, deployment_id: str) -> list[dict[str, Any]]:
         with self._lock:
@@ -416,8 +475,8 @@ class Database:
         job_id: str,
         *,
         status: str | None = None,
-        result: Any = None,
-        error: str | None = None,
+        result: Any = _UNSET,
+        error: str | None | object = _UNSET,
         started_at: float | None = None,
         finished_at: float | None = None,
     ) -> None:
@@ -426,10 +485,10 @@ class Database:
         if status is not None:
             assignments.append("status = ?")
             values.append(status)
-        if result is not None:
+        if result is not _UNSET:
             assignments.append("result_json = ?")
             values.append(_json_encode(result))
-        if error is not None:
+        if error is not _UNSET:
             assignments.append("error = ?")
             values.append(error)
         if started_at is not None:
@@ -439,7 +498,7 @@ class Database:
             assignments.append("finished_at = ?")
             values.append(finished_at)
         if not assignments:
-            return
+            raise ValueError("no job fields to update")
         values.append(job_id)
 
         with self._lock, self._conn:
@@ -455,6 +514,7 @@ class Database:
         return None if row is None else self._job_row(row)
 
     def list_jobs(self, limit: int = 100) -> list[dict[str, Any]]:
+        limit = _validate_limit(limit)
         with self._lock:
             rows = self._conn.execute(
                 "SELECT * FROM jobs ORDER BY created_at DESC, id DESC LIMIT ?", (limit,)
@@ -491,6 +551,7 @@ class Database:
     def list_job_events(
         self, job_id: str, *, after_id: int = 0, limit: int = 500
     ) -> list[dict[str, Any]]:
+        limit = _validate_limit(limit)
         with self._lock:
             rows = self._conn.execute(
                 """
@@ -530,10 +591,13 @@ class Database:
 
     def record_metrics(self, rows: Iterable[Sequence[Any]]) -> None:
         now = time.time()
-        payload = [
-            (row[0], row[1], now if len(row) < 4 or row[3] is None else row[3], row[2])
-            for row in rows
-        ]
+        payload: list[tuple[Any, Any, Any, Any]] = []
+        for row in rows:
+            if len(row) not in (3, 4):
+                raise ValueError("metric rows must be (node_id, metric, value[, ts])")
+            node_id, metric, value = row[0], row[1], row[2]
+            ts = now if len(row) == 3 or row[3] is None else row[3]
+            payload.append((node_id, metric, ts, value))
         if not payload:
             return
         with self._lock, self._conn:
@@ -564,6 +628,7 @@ class Database:
         until: float | None = None,
         limit: int = 1000,
     ) -> list[dict[str, Any]]:
+        limit = _validate_limit(limit)
         clauses = ["node_id = ?", "metric = ?"]
         values: list[Any] = [node_id, metric]
         if since is not None:
@@ -577,14 +642,17 @@ class Database:
         with self._lock:
             rows = self._conn.execute(
                 f"""
-                SELECT * FROM node_metrics
-                WHERE {" AND ".join(clauses)}
-                ORDER BY ts ASC, rowid ASC
-                LIMIT ?
+                SELECT * FROM (
+                    SELECT rowid AS _rowid, * FROM node_metrics
+                    WHERE {" AND ".join(clauses)}
+                    ORDER BY ts DESC, rowid DESC
+                    LIMIT ?
+                )
+                ORDER BY ts ASC, _rowid ASC
                 """,
                 tuple(values),
             ).fetchall()
-        return [dict(row) for row in rows]
+        return [{key: value for key, value in dict(row).items() if key != "_rowid"} for row in rows]
 
     # Inference -------------------------------------------------------------
 
@@ -629,6 +697,7 @@ class Database:
         until: float | None = None,
         limit: int = 1000,
     ) -> list[dict[str, Any]]:
+        limit = _validate_limit(limit)
         clauses = ["deployment_id = ?"]
         values: list[Any] = [deployment_id]
         if since is not None:
@@ -642,10 +711,13 @@ class Database:
         with self._lock:
             rows = self._conn.execute(
                 f"""
-                SELECT * FROM inference_samples
-                WHERE {" AND ".join(clauses)}
+                SELECT * FROM (
+                    SELECT * FROM inference_samples
+                    WHERE {" AND ".join(clauses)}
+                    ORDER BY ts DESC, id DESC
+                    LIMIT ?
+                )
                 ORDER BY ts ASC, id ASC
-                LIMIT ?
                 """,
                 tuple(values),
             ).fetchall()
@@ -691,15 +763,24 @@ class Database:
             inference = self._conn.execute(
                 "DELETE FROM inference_samples WHERE ts < ?", (cutoff,)
             ).rowcount
-        return {"metrics": int(metrics), "inference": int(inference)}
+            events = self._conn.execute("DELETE FROM job_events WHERE ts < ?", (cutoff,)).rowcount
+        return {
+            "metrics": int(metrics),
+            "inference": int(inference),
+            "job_events": int(events),
+        }
 
     def incremental_vacuum(self) -> None:
         with self._lock:
+            mode = self._conn.execute("PRAGMA auto_vacuum").fetchone()[0]
+            if mode != 2:
+                raise DatabaseError("incremental vacuum requires auto_vacuum=INCREMENTAL")
             self._conn.execute("PRAGMA incremental_vacuum")
             self._conn.commit()
 
     def vacuum(self) -> None:
         with self._lock:
+            self._conn.commit()
             self._conn.execute("VACUUM")
 
     def close(self) -> None:

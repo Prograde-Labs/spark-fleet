@@ -191,6 +191,7 @@ def test_delete_deployment_cascades_roles(db):
 
 
 def test_jobs_and_events(db):
+    db.create_deployment("dep-1", "demo-glm", "demo-glm", "deployment", {})
     db.create_job("job-1", "load", deployment_id="dep-1", payload={"recipe": "demo-glm"})
 
     job = db.get_job("job-1")
@@ -261,6 +262,7 @@ def test_latest_metric_missing_returns_none(db):
 
 
 def test_inference_samples(db):
+    db.create_deployment("dep-1", "demo-glm", "demo-glm", "deployment", {})
     db.record_inference_sample(
         "dep-1",
         requests=10,
@@ -297,16 +299,21 @@ def test_settings(db):
 
 def test_prune_retention(db):
     add_node(db)
+    db.create_deployment("dep-1", "demo-glm", "demo-glm", "deployment", {})
     db.record_metric("spark-01", "mem_available", 1.0, ts=10.0)
     db.record_metric("spark-01", "mem_available", 2.0, ts=100.0)
     db.record_inference_sample("dep-1", requests=1, ts=10.0)
     db.record_inference_sample("dep-1", requests=2, ts=100.0)
+    db.create_job("job-1", "load", deployment_id="dep-1")
+    db.append_job_event("job-1", "old", ts=10.0)
+    db.append_job_event("job-1", "new", ts=100.0)
 
     counts = db.prune(retention_seconds=50, now=110.0)
 
-    assert counts == {"metrics": 1, "inference": 1}
+    assert counts == {"metrics": 1, "inference": 1, "job_events": 1}
     assert [sample["ts"] for sample in db.metric_series("spark-01", "mem_available")] == [100.0]
     assert [sample["ts"] for sample in db.inference_series("dep-1")] == [100.0]
+    assert [event["message"] for event in db.list_job_events("job-1")] == ["new"]
 
 
 def test_incremental_vacuum_runs(db):
@@ -315,7 +322,18 @@ def test_incremental_vacuum_runs(db):
 
     db.incremental_vacuum()
 
+    assert db.auto_vacuum_mode == 2
     assert db.schema_version == SCHEMA_VERSION
+
+
+def test_vacuum_runs(db):
+    add_node(db)
+    db.record_metric("spark-01", "mem_available", 1.0, ts=10.0)
+    db.prune(retention_seconds=0, now=100.0)
+
+    db.vacuum()
+
+    assert db.get_node("spark-01") is not None
 
 
 def test_reopen_preserves_data(db, tmp_path):
@@ -348,3 +366,163 @@ def test_future_schema_version_rejected(tmp_path):
 def test_context_manager(tmp_path):
     with Database(tmp_path / "fleet.sqlite") as database:
         assert database.schema_version == SCHEMA_VERSION
+
+    with pytest.raises(sqlite3.ProgrammingError):
+        database.get_node("spark-01")
+
+
+def test_auto_vacuum_is_incremental(db):
+    assert db.auto_vacuum_mode == 2
+
+
+def test_node_info_can_be_cleared(db):
+    add_node(db)
+
+    db.upsert_node(
+        "spark-01",
+        display_name="Spark spark-01",
+        lan_ip="192.0.2.239",
+        fabric_ip="198.51.100.10",
+        agent_url="http://spark-01:8092",
+        info=None,
+    )
+
+    assert db.get_node("spark-01")["info"] is None
+
+
+def test_delete_node_with_roles_refused(db):
+    add_node(db)
+    db.create_deployment("dep-1", "demo-glm", "demo-glm", "deployment", {})
+    db.upsert_role("dep-1", "head", "spark-01", "heavy", 0)
+
+    with pytest.raises(DatabaseError, match="referenced"):
+        db.delete_node("spark-01")
+
+
+def test_role_upsert_preserves_status_and_container(db):
+    add_node(db)
+    db.create_deployment("dep-1", "demo-glm", "demo-glm", "deployment", {})
+    db.upsert_role(
+        "dep-1", "head", "spark-01", "heavy", 0, status="running", container_id="container-1"
+    )
+
+    db.upsert_role("dep-1", "head", "spark-01", "heavy", 0)
+
+    head = db.list_roles("dep-1")[0]
+    assert head["status"] == "running"
+    assert head["container_id"] == "container-1"
+
+
+def test_deployment_error_can_be_cleared(db):
+    db.create_deployment("dep-1", "demo-glm", "demo-glm", "deployment", {})
+
+    db.update_deployment("dep-1", error="boom")
+    assert db.get_deployment("dep-1")["error"] == "boom"
+
+    db.update_deployment("dep-1", error=None)
+    assert db.get_deployment("dep-1")["error"] is None
+
+
+def test_job_result_can_be_cleared(db):
+    db.create_job("job-1", "load")
+
+    db.update_job("job-1", result={"loaded": True})
+    assert db.get_job("job-1")["result"] == {"loaded": True}
+
+    db.update_job("job-1", result=None)
+    assert db.get_job("job-1")["result"] is None
+
+
+def test_job_with_unknown_deployment_rejected(db):
+    with pytest.raises(sqlite3.IntegrityError):
+        db.create_job("job-1", "load", deployment_id="ghost")
+
+
+def test_inference_with_unknown_deployment_rejected(db):
+    with pytest.raises(sqlite3.IntegrityError):
+        db.record_inference_sample("ghost")
+
+
+def test_delete_deployment_detaches_jobs_and_drops_samples(db):
+    add_node(db)
+    db.create_deployment("dep-1", "demo-glm", "demo-glm", "deployment", {})
+    db.create_job("job-1", "load", deployment_id="dep-1")
+    db.record_inference_sample("dep-1", requests=1, ts=10.0)
+
+    db.delete_deployment("dep-1")
+
+    assert db.get_job("job-1")["deployment_id"] is None
+    assert db.inference_series("dep-1") == []
+
+
+def test_record_metrics_rejects_bad_rows(db):
+    with pytest.raises(ValueError, match="metric rows"):
+        db.record_metrics([("spark-01", "mem_available")])
+
+
+@pytest.mark.parametrize(
+    "call",
+    [
+        lambda db: db.list_jobs(limit=-1),
+        lambda db: db.list_job_events("job-1", limit=-1),
+        lambda db: db.metric_series("spark-01", "m", limit=-1),
+        lambda db: db.inference_series("dep-1", limit=-1),
+    ],
+)
+def test_negative_limits_rejected(db, call):
+    with pytest.raises(ValueError, match="limit"):
+        call(db)
+
+
+def test_series_limit_returns_newest_samples(db):
+    add_node(db)
+    for ts in (1.0, 2.0, 3.0):
+        db.record_metric("spark-01", "mem_available", ts, ts=ts)
+    db.create_deployment("dep-1", "demo-glm", "demo-glm", "deployment", {})
+    for ts in (1.0, 2.0, 3.0):
+        db.record_inference_sample("dep-1", requests=int(ts), ts=ts)
+
+    assert [sample["ts"] for sample in db.metric_series("spark-01", "mem_available", limit=2)] == [
+        2.0,
+        3.0,
+    ]
+    assert [sample["ts"] for sample in db.inference_series("dep-1", limit=2)] == [2.0, 3.0]
+
+
+def test_prune_rejects_negative_retention(db):
+    with pytest.raises(ValueError, match="retention"):
+        db.prune(-1)
+
+
+def test_failed_open_closes_connection(tmp_path):
+    path = tmp_path / "fleet.sqlite"
+    database = Database(path)
+    database.close()
+
+    connection = sqlite3.connect(path)
+    connection.execute("PRAGMA user_version = 99")
+    connection.commit()
+    connection.close()
+
+    with pytest.raises(DatabaseError, match="newer"):
+        Database(path)
+
+    connection = sqlite3.connect(path)
+    try:
+        connection.execute("SELECT 1")
+    finally:
+        connection.close()
+
+
+def test_migration_failure_is_wrapped(tmp_path):
+    path = tmp_path / "fleet.sqlite"
+    database = Database(path)
+    database.close()
+
+    connection = sqlite3.connect(path)
+    connection.execute("PRAGMA user_version = 0")
+    connection.commit()
+    connection.close()
+
+    with pytest.raises(DatabaseError, match="migration failed"):
+        Database(path)
