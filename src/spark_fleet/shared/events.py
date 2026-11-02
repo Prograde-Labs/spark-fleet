@@ -25,6 +25,20 @@ class Event:
     ts: float = field(default_factory=time.time)
     id: str | None = None
 
+    def __post_init__(self) -> None:
+        if not self.type:
+            raise ValueError("event type must not be empty")
+        if "\n" in self.type or "\r" in self.type:
+            raise ValueError(f"invalid event type: {self.type!r}")
+        if self.id is not None and ("\n" in self.id or "\r" in self.id):
+            raise ValueError(f"invalid event id: {self.id!r}")
+        if not isinstance(self.data, Mapping):
+            raise ValueError("event data must be a mapping")
+        try:
+            json.dumps(dict(self.data), sort_keys=True, separators=(",", ":"))
+        except (TypeError, ValueError) as exc:
+            raise ValueError(f"event data is not JSON-serializable: {exc}") from exc
+
 
 def format_sse(event: Event) -> str:
     """Format an event as one SSE frame."""
@@ -129,5 +143,6 @@ class EventBus:
                 except asyncio.QueueFull:
                     try:
                         queue.get_nowait()
+                        self._dropped += 1
                     except asyncio.QueueEmpty:
                         break

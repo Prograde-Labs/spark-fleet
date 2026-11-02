@@ -146,13 +146,94 @@ async def test_nonpositive_keepalive_rejected():
         await anext(bus.sse_stream(keepalive_seconds=0))
 
 
-@pytest.mark.parametrize(
-    "event",
-    [
-        Event("bad\ntype", {}),
-        Event("memory", {}, id="bad\nid"),
-    ],
-)
-def test_sse_rejects_header_injection(event):
-    with pytest.raises(ValueError, match="invalid"):
-        format_sse(event)
+def test_event_rejects_newline_in_type():
+    with pytest.raises(ValueError, match="invalid event type"):
+        Event("bad\ntype", {})
+
+
+def test_event_rejects_newline_in_id():
+    with pytest.raises(ValueError, match="invalid event id"):
+        Event("memory", {}, id="bad\nid")
+
+
+def test_event_rejects_non_json_data():
+    with pytest.raises(ValueError, match="JSON"):
+        Event("memory", {"when": object()})
+
+
+async def test_publish_after_close_is_ignored_with_subscriber():
+    bus = EventBus()
+
+    async def drain():
+        return [event async for event in bus.subscribe()]
+
+    task = asyncio.create_task(drain())
+    await asyncio.sleep(0)
+
+    await bus.close()
+    await bus.publish(Event("memory", {"node": "spark-01"}))
+
+    assert await task == []
+
+
+async def test_close_is_idempotent_with_active_subscriber():
+    bus = EventBus()
+
+    async def drain():
+        return [event async for event in bus.subscribe()]
+
+    task = asyncio.create_task(drain())
+    await asyncio.sleep(0)
+
+    await bus.close()
+    await bus.close()
+
+    assert await task == []
+
+
+async def test_sse_stream_terminates_on_close():
+    bus = EventBus()
+    stream = bus.sse_stream(keepalive_seconds=10)
+    task = asyncio.create_task(anext(stream))
+    await asyncio.sleep(0)
+
+    await bus.close()
+
+    with pytest.raises(StopAsyncIteration):
+        await task
+
+
+async def test_close_counts_dropped_queued_event():
+    bus = EventBus(queue_size=1)
+    stream = bus.subscribe()
+    task = asyncio.create_task(anext(stream))
+    await asyncio.sleep(0)
+
+    await bus.publish(Event("first", {}))
+    await bus.close()
+
+    with pytest.raises(StopAsyncIteration):
+        await task
+    assert bus.dropped == 1
+
+
+async def test_stalled_subscriber_does_not_block_others():
+    bus = EventBus(queue_size=1)
+    stalled = bus.subscribe()
+    stalled_task = asyncio.create_task(anext(stalled))
+    await asyncio.sleep(0)
+    await bus.publish(Event("warm", {}))
+    assert (await stalled_task).type == "warm"
+
+    active = asyncio.create_task(collect(bus, 3))
+    await asyncio.sleep(0)
+    for index in range(5):
+        await bus.publish(Event(f"e{index}", {}))
+        await asyncio.sleep(0)
+
+    events = await active
+
+    assert [event.type for event in events] == ["e0", "e1", "e2"]
+    assert bus.dropped > 0
+
+    await stalled.aclose()
