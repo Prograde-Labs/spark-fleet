@@ -12,9 +12,10 @@ import platform
 import socket
 from typing import Any
 
-from fastapi import Depends, FastAPI
+from fastapi import Depends, FastAPI, HTTPException
 
 import spark_fleet
+from spark_fleet.agent.metrics import MetricsError, collect_metrics, snapshot_to_dict
 from spark_fleet.shared.config import AgentConfig
 from spark_fleet.shared.security import agent_auth_dependency
 
@@ -41,5 +42,13 @@ def build_app(config: AgentConfig) -> FastAPI:
             "compose_projects_dir": str(config.compose_projects_dir),
             "model_cache_roots": [str(root) for root in config.model_cache_roots],
         }
+
+    @app.get("/metrics", dependencies=[Depends(auth)])
+    def metrics_snapshot() -> dict[str, Any]:
+        try:
+            snapshot = collect_metrics(config.model_cache_roots)
+        except MetricsError as exc:
+            raise HTTPException(status_code=503, detail=str(exc)) from exc
+        return snapshot_to_dict(snapshot)
 
     return app
