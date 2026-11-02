@@ -52,6 +52,7 @@ class ProjectSpec:
     project: str
     directory: Path
     deployment: str
+    recipe: str
     role: str
     config_hash: str
 
@@ -91,6 +92,7 @@ def validate_project(directory: Path, compose: Mapping[str, Any], project: str) 
         project=project,
         directory=directory,
         deployment=labels[LABEL_DEPLOYMENT],
+        recipe=labels[LABEL_RECIPE],
         role=labels[LABEL_ROLE],
         config_hash=hashlib.sha256(normalized.encode()).hexdigest(),
     )
@@ -109,6 +111,11 @@ def up_project(spec: ProjectSpec) -> list[ContainerStatus]:
         raise ComposeError(f"no containers found for project {spec.project}")
     for container in statuses:
         _verify_labels(container, spec)
+    if not any(container.state == "running" for container in statuses):
+        states = ", ".join(
+            f"{container.name or container.id}={container.state}" for container in statuses
+        )
+        raise ComposeError(f"project {spec.project} has no running container: {states}")
     return statuses
 
 
@@ -160,6 +167,11 @@ def _validate_document(compose: Mapping[str, Any]) -> dict[str, Any]:
     if missing:
         raise ComposeError(f"workload service is missing fleet labels: {', '.join(missing)}")
 
+    expected_name = f"spark-fleet-{labels[LABEL_DEPLOYMENT]}-{labels[LABEL_ROLE]}"
+    container_name = workload.get("container_name")
+    if container_name != expected_name:
+        raise ComposeError(f"workload container_name {container_name!r} must be {expected_name!r}")
+
     return dict(compose)
 
 
@@ -190,6 +202,7 @@ def _container_status(row: Mapping[str, Any]) -> ContainerStatus:
 def _verify_labels(container: ContainerStatus, spec: ProjectSpec) -> None:
     expected = {
         LABEL_DEPLOYMENT: spec.deployment,
+        LABEL_RECIPE: spec.recipe,
         LABEL_ROLE: spec.role,
     }
     for label, value in expected.items():

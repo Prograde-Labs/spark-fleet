@@ -38,6 +38,7 @@ def compose_doc(labels=None):
         "services": {
             "workload": {
                 "image": "ghcr.io/org/img:tag",
+                "container_name": "spark-fleet-demo-glm-head",
                 "labels": labels
                 if labels is not None
                 else {
@@ -149,6 +150,26 @@ def test_compose_oserror_raises(monkeypatch):
         docker_ops.compose_down(Path("/tmp/compose.yaml"), PROJECT)
 
 
+def test_list_containers_builds_expected_command(monkeypatch):
+    calls = []
+    monkeypatch.setattr(
+        docker_ops.subprocess,
+        "run",
+        lambda args, **kwargs: calls.append(args) or completed(args, stdout=""),
+    )
+
+    assert docker_ops.list_containers(PROJECT) == []
+    assert calls[0] == [
+        "docker",
+        "ps",
+        "-a",
+        "--filter",
+        f"label=com.docker.compose.project={PROJECT}",
+        "--format",
+        "{{json .}}",
+    ]
+
+
 def test_list_containers_parses_ndjson(monkeypatch):
     output = '{"ID": "one", "State": "running"}\n\n{"ID": "two", "State": "exited"}\n'
     monkeypatch.setattr(
@@ -195,6 +216,7 @@ def test_validate_project_writes_file_and_hashes_normalized_config(tmp_path, mon
     assert spec.project == PROJECT
     assert spec.directory == directory
     assert spec.deployment == "demo-glm"
+    assert spec.recipe == "demo-glm"
     assert spec.role == "head"
     assert spec.config_hash == hashlib.sha256(b"normalized: true\n").hexdigest()
     written = (directory / COMPOSE_FILE_NAME).read_text()
@@ -262,6 +284,16 @@ def test_validate_project_requires_label_mapping(tmp_path, monkeypatch):
         validate_project(tmp_path, doc, PROJECT)
 
 
+@pytest.mark.parametrize("container_name", ["postgres", None, ""])
+def test_validate_project_rejects_arbitrary_container_name(tmp_path, monkeypatch, container_name):
+    fake_config(monkeypatch)
+    doc = compose_doc()
+    doc["services"]["workload"]["container_name"] = container_name
+
+    with pytest.raises(ComposeError, match="container_name"):
+        validate_project(tmp_path, doc, PROJECT)
+
+
 def test_validate_project_wraps_docker_errors(tmp_path, monkeypatch):
     def fail(file, project, **kwargs):
         raise docker_ops.DockerError("docker compose config failed")
@@ -280,6 +312,7 @@ def make_spec(tmp_path):
         project=PROJECT,
         directory=tmp_path,
         deployment="demo-glm",
+        recipe="demo-glm",
         role="head",
         config_hash="abc",
     )
@@ -346,11 +379,25 @@ def test_up_project_rejects_missing_role_label(tmp_path, monkeypatch):
     monkeypatch.setattr(
         "spark_fleet.agent.compose.docker_ops.list_containers",
         lambda *a, **k: [
-            container_row(Labels=f"{LABEL_DEPLOYMENT}=demo-glm,{LABEL_CONFIG_HASH}=abc")
+            container_row(
+                Labels=f"{LABEL_DEPLOYMENT}=demo-glm,{LABEL_RECIPE}=demo-glm,"
+                f"{LABEL_CONFIG_HASH}=abc"
+            )
         ],
     )
 
     with pytest.raises(ComposeError, match=LABEL_ROLE):
+        up_project(make_spec(tmp_path))
+
+
+def test_up_project_rejects_non_running_container(tmp_path, monkeypatch):
+    monkeypatch.setattr("spark_fleet.agent.compose.docker_ops.compose_up", lambda *a, **k: None)
+    monkeypatch.setattr(
+        "spark_fleet.agent.compose.docker_ops.list_containers",
+        lambda *a, **k: [container_row(State="exited", Status="Exited (1) 2 seconds ago")],
+    )
+
+    with pytest.raises(ComposeError, match="no running container"):
         up_project(make_spec(tmp_path))
 
 

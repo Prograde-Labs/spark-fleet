@@ -76,6 +76,7 @@ def list_containers(project: str, *, timeout: float = 60.0) -> list[dict[str, An
         [
             DOCKER,
             "ps",
+            "-a",
             "--filter",
             f"label=com.docker.compose.project={project}",
             "--format",
