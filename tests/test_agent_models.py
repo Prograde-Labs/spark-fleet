@@ -772,3 +772,15 @@ def test_job_manager_allows_start_after_removal_completes(tmp_path, monkeypatch)
 
     status = manager.wait(manager.start("org/name"), timeout=2)
     assert status.state == "succeeded"
+
+
+def test_job_manager_clears_removal_guard_after_failure(tmp_path, monkeypatch):
+    root = tmp_path / "hub"
+    manager = ModelJobManager(ModelCatalog([root]))
+    monkeypatch.setattr(models, "snapshot_download", lambda *args, **kwargs: str(root))
+
+    with pytest.raises(ModelError, match="confirm"):
+        manager.remove("org/name")
+
+    status = manager.wait(manager.start("org/name"), timeout=2)
+    assert status.state == "succeeded"
