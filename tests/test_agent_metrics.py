@@ -14,6 +14,7 @@ from spark_fleet.agent.metrics import (
     HostMemory,
     MetricsError,
     MetricsSnapshot,
+    cache_disk_usage,
     collect_gpus,
     collect_metrics,
     parse_meminfo,
@@ -168,6 +169,29 @@ def test_collect_gpus_parses_output():
     assert calls[0][1]["text"] is True
 
 
+def test_collect_gpus_handles_unsupported_fields_and_quoted_names():
+    stdout = '0, "NVIDIA GB10, Rev 2", 65536, 1024, [Not Supported], [Insufficient Permissions]\n'
+
+    gpus, error = collect_gpus(runner=lambda args, **kwargs: completed(args, stdout=stdout))
+
+    assert error is None
+    assert gpus[0].name == "NVIDIA GB10, Rev 2"
+    assert gpus[0].memory_total_bytes == 65_536 * 1024 * 1024
+    assert gpus[0].memory_used_bytes == 1024 * 1024 * 1024
+    assert gpus[0].utilization_percent is None
+    assert gpus[0].temperature_celsius is None
+
+
+def test_collect_gpus_keeps_valid_rows_when_one_is_malformed():
+    stdout = "0, NVIDIA GB10, 65536, 1024, 5, 40\nnot,a,valid,row\n"
+
+    gpus, error = collect_gpus(runner=lambda args, **kwargs: completed(args, stdout=stdout))
+
+    assert len(gpus) == 1
+    assert gpus[0].index == 0
+    assert "could not parse" in error
+
+
 def test_collect_gpus_returns_empty_for_no_gpus():
     gpus, error = collect_gpus(runner=lambda args, **kwargs: completed(args, stdout=""))
 
@@ -304,6 +328,37 @@ def test_collect_metrics_uses_default_cache_sampler(tmp_path):
     assert snapshot.cache_bytes == 10
 
 
+def test_cache_disk_usage_sums_and_reports_walk_errors(tmp_path, monkeypatch):
+    root = tmp_path / "hub"
+    root.mkdir()
+    (root / "file").write_bytes(b"1234")
+
+    def fake_walk(path, onerror=None):
+        onerror(OSError("permission denied"))
+        yield str(path), [], ["file"]
+
+    monkeypatch.setattr(metrics.os, "walk", fake_walk)
+
+    total, error = cache_disk_usage([root])
+
+    assert total == 4
+    assert "permission denied" in error
+
+
+def test_collect_metrics_records_default_cache_error(tmp_path, monkeypatch):
+    monkeypatch.setattr(metrics, "cache_disk_usage", lambda roots: (100, "permission denied"))
+
+    snapshot = collect_metrics(
+        [tmp_path / "hub"],
+        meminfo_path=write_meminfo(tmp_path),
+        container_sampler=lambda: [],
+        gpu_sampler=lambda: ((), None),
+    )
+
+    assert snapshot.cache_bytes == 100
+    assert "permission denied" in snapshot.errors["cache"]
+
+
 def test_collect_metrics_includes_gpu_data(tmp_path):
     gpu = GpuInfo(
         index=0,
@@ -423,6 +478,7 @@ def test_metrics_endpoint_requires_token(tmp_path):
 
 
 def test_metrics_endpoint_returns_snapshot(tmp_path, monkeypatch):
+    agent_config = config(tmp_path)
     snapshot = MetricsSnapshot(
         sampled_at=1234.5,
         host_total_bytes=1000,
@@ -433,8 +489,13 @@ def test_metrics_endpoint_returns_snapshot(tmp_path, monkeypatch):
         gpus=(),
         errors={},
     )
-    monkeypatch.setattr("spark_fleet.agent.api.collect_metrics", lambda roots: snapshot)
-    client = TestClient(build_app(config(tmp_path)))
+
+    def fake_collect(roots):
+        assert tuple(roots) == agent_config.model_cache_roots
+        return snapshot
+
+    monkeypatch.setattr("spark_fleet.agent.api.collect_metrics", fake_collect)
+    client = TestClient(build_app(agent_config))
 
     response = client.get("/metrics", headers=auth())
 

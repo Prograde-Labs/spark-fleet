@@ -9,6 +9,8 @@ required because a node snapshot without it is meaningless.
 
 from __future__ import annotations
 
+import csv
+import os
 import re
 import subprocess
 import time
@@ -19,7 +21,6 @@ from typing import Any
 
 from spark_fleet.agent import containers
 from spark_fleet.agent.containers import ContainerInfo
-from spark_fleet.agent.models import ModelCatalog
 
 MEMINFO_PATH = Path("/proc/meminfo")
 GPU_TIMEOUT_SECONDS = 5.0
@@ -116,11 +117,47 @@ def collect_gpus(
         detail = (result.stderr or result.stdout or "").strip()
         return (), detail or f"nvidia-smi exited {result.returncode}"
 
-    try:
-        gpus = tuple(_parse_gpu_line(line) for line in result.stdout.splitlines() if line.strip())
-    except ValueError as exc:
-        return (), f"could not parse nvidia-smi output: {exc}"
-    return gpus, None
+    gpus: list[GpuInfo] = []
+    parse_errors: list[str] = []
+    for line in result.stdout.splitlines():
+        if not line.strip():
+            continue
+        try:
+            gpus.append(_parse_gpu_line(line))
+        except ValueError as exc:
+            parse_errors.append(str(exc))
+    if parse_errors:
+        return tuple(gpus), f"could not parse nvidia-smi output: {'; '.join(parse_errors)}"
+    return tuple(gpus), None
+
+
+def cache_disk_usage(roots: Sequence[Path]) -> tuple[int, str | None]:
+    """Sum inode-deduplicated cache bytes and report unreadable subtrees."""
+
+    seen: set[tuple[int, int]] = set()
+    total = 0
+    errors: list[str] = []
+    for root in roots:
+        if not root.is_dir():
+            continue
+        for dirpath, _dirnames, filenames in os.walk(root, onerror=errors.append):
+            for filename in filenames:
+                path = Path(dirpath) / filename
+                if path.is_symlink():
+                    continue
+                try:
+                    stat = path.stat()
+                except OSError as exc:
+                    errors.append(exc)
+                    continue
+                inode = (stat.st_dev, stat.st_ino)
+                if inode in seen:
+                    continue
+                seen.add(inode)
+                total += stat.st_size
+    if errors:
+        return total, "; ".join(str(error) for error in errors)
+    return total, None
 
 
 def collect_metrics(
@@ -148,13 +185,16 @@ def collect_metrics(
         errors["containers"] = str(exc)
     container_memory_bytes = sum(info.memory_usage or 0 for info in container_list)
 
-    try:
-        cache_bytes = (
-            cache_sampler() if cache_sampler is not None else ModelCatalog(cache_roots).disk_usage()
-        )
-    except Exception as exc:
-        cache_bytes = 0
-        errors["cache"] = str(exc)
+    if cache_sampler is not None:
+        try:
+            cache_bytes = cache_sampler()
+        except Exception as exc:
+            cache_bytes = 0
+            errors["cache"] = str(exc)
+    else:
+        cache_bytes, cache_error = cache_disk_usage(cache_roots)
+        if cache_error is not None:
+            errors["cache"] = cache_error
 
     if gpu_sampler is not None:
         gpus, gpu_error = gpu_sampler()
@@ -214,9 +254,14 @@ def snapshot_to_dict(snapshot: MetricsSnapshot) -> dict[str, Any]:
 
 
 def _parse_gpu_line(line: str) -> GpuInfo:
-    fields = [field.strip() for field in line.split(",")]
-    if len(fields) != 6:
-        raise ValueError(f"expected 6 fields, got {len(fields)}: {line!r}")
+    try:
+        rows = list(csv.reader([line], skipinitialspace=True))
+    except csv.Error as exc:
+        raise ValueError(f"invalid CSV row: {line!r}") from exc
+    if len(rows) != 1 or len(rows[0]) != 6:
+        count = len(rows[0]) if len(rows) == 1 else 0
+        raise ValueError(f"expected 6 fields, got {count}: {line!r}")
+    fields = [field.strip() for field in rows[0]]
     index = _required_int(fields[0], "index")
     name = fields[1]
     if not name:
@@ -239,7 +284,7 @@ def _required_int(value: str, field: str) -> int:
 
 
 def _optional_int(value: str) -> int | None:
-    if not value or value == "[N/A]":
+    if not value or (value.startswith("[") and value.endswith("]")):
         return None
     try:
         return int(value)
