@@ -91,10 +91,11 @@ def build_app(
             raise HTTPException(status_code=400, detail="password is required")
         try:
             token = login_session(ui_password, session_secret, password)
+            session = verify_session(session_secret, token)
         except AuthError as exc:
             raise HTTPException(status_code=401, detail=str(exc)) from exc
         response.set_cookie(value=token, **session_cookie_settings())
-        return {"authenticated": True}
+        return {"authenticated": True, "csrf": session.csrf}
 
     @app.post("/api/logout", dependencies=[Depends(mutation_dep)])
     def logout(response: Response) -> dict[str, Any]:
@@ -105,15 +106,16 @@ def build_app(
     def session_status(request: Request) -> dict[str, Any]:
         enabled = session_secret is not None
         authenticated = False
+        csrf = None
         if enabled:
             token = request.cookies.get(SESSION_COOKIE_NAME)
             if token:
                 try:
-                    verify_session(session_secret, token)
+                    csrf = verify_session(session_secret, token).csrf
                     authenticated = True
                 except SessionError:
                     authenticated = False
-        return {"enabled": enabled, "authenticated": authenticated}
+        return {"enabled": enabled, "authenticated": authenticated, "csrf": csrf}
 
     # Nodes ----------------------------------------------------------------
 

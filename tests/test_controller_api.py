@@ -294,7 +294,11 @@ def test_health(env):
 def test_session_reports_login_disabled(env):
     response = env.client.get("/api/session")
 
-    assert response.json() == {"enabled": False, "authenticated": False}
+    assert response.json() == {
+        "enabled": False,
+        "authenticated": False,
+        "csrf": None,
+    }
 
 
 def test_login_is_disabled_without_password(env):
@@ -310,11 +314,16 @@ def test_login_sets_cookie_and_requires_csrf(secured_env):
     assert client.post("/api/login", json={"password": "wrong"}).status_code == 401
     response = client.post("/api/login", json={"password": PASSWORD})
     assert response.status_code == 200
-    assert response.json() == {"authenticated": True}
+    assert response.json()["authenticated"] is True
     assert SESSION_COOKIE_NAME in response.cookies
 
     session = verify_session(SECRET, response.cookies[SESSION_COOKIE_NAME])
-    assert client.get("/api/session").json() == {"enabled": True, "authenticated": True}
+    assert response.json()["csrf"] == session.csrf
+    assert client.get("/api/session").json() == {
+        "enabled": True,
+        "authenticated": True,
+        "csrf": session.csrf,
+    }
 
     denied = client.put("/api/settings/theme", json={"value": "dark"})
     assert denied.status_code == 403
@@ -330,7 +339,11 @@ def test_login_sets_cookie_and_requires_csrf(secured_env):
 
     assert client.post("/api/logout").status_code == 403
     client.post("/api/logout", headers={"X-CSRF-Token": session.csrf})
-    assert client.get("/api/session").json() == {"enabled": True, "authenticated": False}
+    assert client.get("/api/session").json() == {
+        "enabled": True,
+        "authenticated": False,
+        "csrf": None,
+    }
 
 
 def test_secured_requires_login(secured_env):

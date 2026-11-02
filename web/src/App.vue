@@ -1,6 +1,9 @@
 <script setup>
 import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
+import { api } from './api'
+import { formatRelative } from './format'
+import { eventState, startEvents, stopEvents } from './stores/events'
 import {
   Activity,
   Boxes,
@@ -21,6 +24,7 @@ const route = useRoute()
 const router = useRouter()
 const mobileOpen = ref(false)
 const now = ref(new Date())
+const session = ref({ enabled: false, authenticated: false })
 let timer = null
 
 const navGroups = [
@@ -66,13 +70,20 @@ const date = computed(() =>
   }),
 )
 
-onMounted(() => {
+onMounted(async () => {
+  startEvents()
   timer = setInterval(() => {
     now.value = new Date()
   }, 1000)
+  try {
+    session.value = await api.session()
+  } catch {
+    session.value = { enabled: false, authenticated: false, offline: true }
+  }
 })
 
 onBeforeUnmount(() => {
+  stopEvents()
   if (timer) clearInterval(timer)
 })
 
@@ -174,7 +185,7 @@ router.afterEach(() => {
           class="mt-3 flex items-center gap-2 font-mono text-[10px] uppercase tracking-[0.14em] text-faint transition hover:text-cyan"
         >
           <LogIn class="h-3.5 w-3.5" />
-          Operator Login
+          {{ session.authenticated ? 'Operator Online' : 'Operator Login' }}
         </router-link>
       </div>
     </aside>
@@ -208,9 +219,12 @@ router.afterEach(() => {
               <p class="hud-label">{{ date }}</p>
             </div>
             <div class="hidden h-9 w-px bg-edge sm:block" />
-            <div class="chip chip-live">
-              <span class="h-1.5 w-1.5 animate-pulseSoft rounded-full bg-signal" />
-              Standby
+            <div class="chip" :class="eventState.connected ? 'chip-live' : 'chip-warn'">
+              <span
+                class="h-1.5 w-1.5 rounded-full"
+                :class="eventState.connected ? 'animate-pulseSoft bg-signal' : 'bg-warning'"
+              />
+              {{ eventState.connected ? 'Live link' : 'Standby' }}
             </div>
           </div>
         </div>
@@ -236,7 +250,11 @@ router.afterEach(() => {
           <span class="hidden sm:inline">LAN-only control plane</span>
           <span class="ml-auto flex items-center gap-2">
             <span class="h-1.5 w-1.5 rounded-full bg-violet" />
-            All systems nominal
+            {{
+              eventState.lastEventAt
+                ? `Telemetry ${formatRelative(eventState.lastEventAt, now.getTime())}`
+                : 'Awaiting telemetry'
+            }}
           </span>
         </div>
       </footer>
