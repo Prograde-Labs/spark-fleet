@@ -68,6 +68,8 @@ def render_deployment(
         raise RenderError(f"invalid deployment name: {deployment_name!r}")
     if not deployment_id:
         raise RenderError("deployment id must not be empty")
+    if recipe.spec.mode == "deployment" and not _heavy_roles(recipe):
+        raise RenderError("deployment recipes require at least one heavy role")
 
     ranks = _resolve_ranks(recipe, node_ranks)
     return [
@@ -85,6 +87,11 @@ def _resolve_ranks(recipe: Recipe, node_ranks: Mapping[str, int] | None) -> dict
     if node_ranks is None:
         return {role.name: index for index, role in enumerate(heavy)}
 
+    heavy_names = {role.name for role in heavy}
+    unknown = sorted(set(node_ranks) - heavy_names)
+    if unknown:
+        raise RenderError(f"node ranks provided for non-heavy roles: {', '.join(unknown)}")
+
     ranks: dict[str, int] = {}
     for role in heavy:
         if role.name not in node_ranks:
@@ -97,7 +104,9 @@ def _resolve_ranks(recipe: Recipe, node_ranks: Mapping[str, int] | None) -> dict
         ranks[role.name] = value
 
     if set(ranks.values()) != set(range(len(heavy))):
-        raise RenderError("node ranks must be unique and contiguous from 0")
+        raise RenderError(
+            f"node ranks must be unique and contiguous from 0, got {sorted(ranks.values())}"
+        )
     return ranks
 
 
@@ -167,10 +176,10 @@ def _render_role(
         if not (isinstance(value, (dict, list)) and not value)
     }
 
-    user_labels = _normalize_labels(role.service.labels)
     service.pop("labels", None)
 
     try:
+        user_labels = _normalize_labels(role.service.labels)
         service = _resolve_value(service, context)
         user_labels = _resolve_value(user_labels, context)
     except RenderError as exc:
@@ -188,7 +197,10 @@ def _render_role(
     service["container_name"] = container_name
 
     compose: dict[str, Any] = {"services": {"workload": service}}
-    config_hash = _config_hash(compose)
+    try:
+        config_hash = _config_hash(compose)
+    except RenderError as exc:
+        raise RenderError(f"role {role.name}: {exc}") from exc
     service["labels"][LABEL_CONFIG_HASH] = config_hash
 
     return RenderedRole(
@@ -214,9 +226,12 @@ def _normalize_labels(labels: Mapping[str, str] | list[str]) -> dict[str, str]:
 
 def _resolve_value(value: Any, context: Mapping[str, str]) -> Any:
     if isinstance(value, str):
-        return _PLACEHOLDER_RE.sub(
+        resolved = _PLACEHOLDER_RE.sub(
             lambda match: _resolve_placeholder(match.group(1).strip(), context), value
         )
+        if "{{" in resolved or "}}" in resolved:
+            raise RenderError(f"unterminated placeholder: {value!r}")
+        return resolved
     if isinstance(value, list):
         return [_resolve_value(item, context) for item in value]
     if isinstance(value, dict):
@@ -235,7 +250,7 @@ def _resolve_placeholder(key: str, context: Mapping[str, str]) -> str:
 
 def _config_hash(compose: Mapping[str, Any]) -> str:
     try:
-        payload = json.dumps(compose, sort_keys=True, separators=(",", ":"))
-    except TypeError as exc:
+        payload = json.dumps(compose, sort_keys=True, separators=(",", ":"), allow_nan=False)
+    except (TypeError, ValueError) as exc:
         raise RenderError(f"compose document is not JSON-serializable: {exc}") from exc
     return hashlib.sha256(payload.encode()).hexdigest()

@@ -414,16 +414,99 @@ def test_light_helper_role_does_not_take_a_rank():
     "ranks",
     [
         {"head": 0, "worker": 0},
+        {"head": 0, "worker": 2},
         {"head": 0, "worker": -1},
         {"head": 0, "worker": "1"},
         {"head": 0, "worker": 1.5},
         {"head": 0, "worker": True},
+        {"head": 0, "worker": None},
         {"head": 0},
     ],
 )
 def test_invalid_node_ranks_rejected(ranks):
     with pytest.raises(RenderError):
         render(ranks=ranks)
+
+
+def test_rank_for_non_heavy_role_rejected():
+    data = copy.deepcopy(DEPLOYMENT)
+    helper = {
+        "name": "helper",
+        "node": "spark-01",
+        "class": "light",
+        "service": {"image": "alpine:latest", "network_mode": "host"},
+    }
+    data["spec"]["roles"].insert(0, helper)
+
+    with pytest.raises(RenderError, match="non-heavy roles: helper"):
+        render(parse_recipe(data), ranks={"head": 0, "worker": 1, "helper": True})
+
+
+def test_deployment_without_heavy_role_rejected():
+    data = copy.deepcopy(DEPLOYMENT)
+    for role in data["spec"]["roles"]:
+        role["class"] = "light"
+
+    with pytest.raises(RenderError, match="heavy role"):
+        render(parse_recipe(data))
+
+
+def test_light_role_cannot_reference_node_rank():
+    data = copy.deepcopy(DEPLOYMENT)
+    helper = {
+        "name": "helper",
+        "node": "spark-01",
+        "class": "light",
+        "service": {
+            "image": "alpine:latest",
+            "network_mode": "host",
+            "environment": {"NODE_RANK": "{{ topology.nodeRank }}"},
+        },
+    }
+    data["spec"]["roles"].insert(0, helper)
+
+    with pytest.raises(RenderError, match="role helper: unknown placeholder"):
+        render(parse_recipe(data))
+
+
+def test_unterminated_placeholder_rejected():
+    data = copy.deepcopy(DEPLOYMENT)
+    data["spec"]["roles"][0]["service"]["environment"]["BAD"] = "{{ deployment.name"
+
+    with pytest.raises(RenderError, match="unterminated placeholder"):
+        render(parse_recipe(data))
+
+
+def test_brace_only_placeholder_rejected():
+    data = copy.deepcopy(DEPLOYMENT)
+    data["spec"]["roles"][0]["service"]["environment"]["BAD"] = "{{}}"
+
+    with pytest.raises(RenderError, match="unterminated placeholder"):
+        render(parse_recipe(data))
+
+
+def test_nan_extra_rejected():
+    data = copy.deepcopy(DEPLOYMENT)
+    data["spec"]["roles"][0]["service"]["x-nan"] = float("nan")
+
+    with pytest.raises(RenderError, match="JSON"):
+        render(parse_recipe(data))
+
+
+def test_invalid_label_names_the_role():
+    data = copy.deepcopy(DEPLOYMENT)
+    data["spec"]["roles"][0]["service"]["labels"] = ["no-separator"]
+
+    with pytest.raises(RenderError, match="role head: invalid label"):
+        render(parse_recipe(data))
+
+
+def test_non_json_error_names_the_role():
+    data = copy.deepcopy(DEPLOYMENT)
+    data["spec"]["roles"][0]["service"]["x-date"] = date(2026, 1, 1)
+
+    with pytest.raises(RenderError, match="role head: compose document is not JSON"):
+        render(parse_recipe(data))
 
 
 def test_unknown_placeholder_names_the_role():
