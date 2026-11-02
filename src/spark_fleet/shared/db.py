@@ -138,6 +138,23 @@ def _validate_limit(limit: int) -> int:
     return limit
 
 
+def _split_statements(script: str) -> list[str]:
+    """Split a SQL script without breaking on semicolons inside literals/triggers."""
+
+    statements: list[str] = []
+    buffer = ""
+    for line in script.splitlines(keepends=True):
+        buffer += line
+        if sqlite3.complete_statement(buffer):
+            statement = buffer.strip()
+            if statement:
+                statements.append(statement)
+            buffer = ""
+    if buffer.strip():
+        statements.append(buffer.strip())
+    return statements
+
+
 class Database:
     """A thread-safe SQLite store shared by controller components."""
 
@@ -148,19 +165,31 @@ class Database:
         if self.path != ":memory:":
             Path(self.path).parent.mkdir(parents=True, exist_ok=True)
 
-        self._conn = sqlite3.connect(self.path, check_same_thread=False)
-        self._conn.row_factory = sqlite3.Row
-        self._conn.execute("PRAGMA busy_timeout = 5000")
-        self._conn.execute("PRAGMA foreign_keys = ON")
-        if self.path != ":memory:":
+        try:
+            self._conn = sqlite3.connect(self.path, check_same_thread=False)
+        except sqlite3.Error as exc:
+            raise DatabaseError(f"database open failed: {exc}") from exc
+
+        try:
+            self._conn.row_factory = sqlite3.Row
+            self._conn.execute("PRAGMA busy_timeout = 5000")
+            self._conn.execute("PRAGMA foreign_keys = ON")
             # auto_vacuum must be set before the database header is written.
             self._conn.execute("PRAGMA auto_vacuum = INCREMENTAL")
-            self._conn.execute("PRAGMA journal_mode = WAL")
-        try:
+            if self.path != ":memory:":
+                self._conn.execute("PRAGMA journal_mode = WAL")
+            if self.auto_vacuum_mode != 2:
+                # An existing database written before auto-vacuum was enabled
+                # needs a one-time rebuild for the pragma to take effect.
+                self._conn.execute("PRAGMA auto_vacuum = INCREMENTAL")
+                self._conn.execute("VACUUM")
             self._migrate()
-        except Exception:
+        except DatabaseError:
             self._conn.close()
             raise
+        except sqlite3.Error as exc:
+            self._conn.close()
+            raise DatabaseError(f"database open failed: {exc}") from exc
 
     def _migrate(self) -> None:
         with self._lock:
@@ -173,10 +202,8 @@ class Database:
                         f"{SCHEMA_VERSION}"
                     )
                 if version < 1:
-                    for statement in _SCHEMA_V1.split(";"):
-                        statement = statement.strip()
-                        if statement:
-                            self._conn.execute(statement)
+                    for statement in _split_statements(_SCHEMA_V1):
+                        self._conn.execute(statement)
                     self._conn.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
                 self._conn.commit()
             except DatabaseError:
@@ -195,6 +222,11 @@ class Database:
     def auto_vacuum_mode(self) -> int:
         with self._lock:
             return int(self._conn.execute("PRAGMA auto_vacuum").fetchone()[0])
+
+    @property
+    def freelist_count(self) -> int:
+        with self._lock:
+            return int(self._conn.execute("PRAGMA freelist_count").fetchone()[0])
 
     # Nodes -----------------------------------------------------------------
 
@@ -393,29 +425,16 @@ class Database:
         container_id: str | None = None,
     ) -> None:
         with self._lock, self._conn:
-            cursor = self._conn.execute(
+            existing = self._conn.execute(
                 """
-                UPDATE deployment_roles SET
-                    node_id = ?,
-                    "class" = ?,
-                    start_order = ?,
-                    config_hash = COALESCE(?, config_hash),
-                    status = COALESCE(?, status),
-                    container_id = COALESCE(?, container_id)
+                SELECT node_id, status, config_hash, container_id
+                FROM deployment_roles
                 WHERE deployment_id = ? AND role_name = ?
                 """,
-                (
-                    node_id,
-                    role_class,
-                    start_order,
-                    config_hash,
-                    status,
-                    container_id,
-                    deployment_id,
-                    role_name,
-                ),
-            )
-            if cursor.rowcount == 0:
+                (deployment_id, role_name),
+            ).fetchone()
+
+            if existing is None:
                 self._conn.execute(
                     """
                     INSERT INTO deployment_roles (
@@ -434,6 +453,38 @@ class Database:
                         container_id,
                     ),
                 )
+                return
+
+            if existing["node_id"] != node_id:
+                # A reassigned role starts fresh on its new node.
+                new_status = status or "pending"
+                new_hash = config_hash
+                new_container = container_id
+            else:
+                new_status = status if status is not None else existing["status"]
+                new_hash = config_hash if config_hash is not None else existing["config_hash"]
+                new_container = (
+                    container_id if container_id is not None else existing["container_id"]
+                )
+
+            self._conn.execute(
+                """
+                UPDATE deployment_roles SET
+                    node_id = ?, "class" = ?, start_order = ?,
+                    config_hash = ?, status = ?, container_id = ?
+                WHERE deployment_id = ? AND role_name = ?
+                """,
+                (
+                    node_id,
+                    role_class,
+                    start_order,
+                    new_hash,
+                    new_status,
+                    new_container,
+                    deployment_id,
+                    role_name,
+                ),
+            )
 
     def list_roles(self, deployment_id: str) -> list[dict[str, Any]]:
         with self._lock:

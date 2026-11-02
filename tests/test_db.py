@@ -326,14 +326,27 @@ def test_incremental_vacuum_runs(db):
     assert db.schema_version == SCHEMA_VERSION
 
 
-def test_vacuum_runs(db):
+def test_vacuum_reclaims_freelist(db):
     add_node(db)
-    db.record_metric("spark-01", "mem_available", 1.0, ts=10.0)
-    db.prune(retention_seconds=0, now=100.0)
+    for index in range(2000):
+        db.record_metric("spark-01", "m", float(index), ts=float(index))
+    db.prune(retention_seconds=0, now=10**9)
+
+    assert db.freelist_count > 0
 
     db.vacuum()
 
+    assert db.freelist_count == 0
     assert db.get_node("spark-01") is not None
+
+
+def test_memory_database_supports_incremental_vacuum():
+    database = Database(":memory:")
+    try:
+        assert database.auto_vacuum_mode == 2
+        database.incremental_vacuum()
+    finally:
+        database.close()
 
 
 def test_reopen_preserves_data(db, tmp_path):
@@ -397,6 +410,29 @@ def test_delete_node_with_roles_refused(db):
 
     with pytest.raises(DatabaseError, match="referenced"):
         db.delete_node("spark-01")
+
+
+def test_role_reassignment_resets_status(db):
+    add_node(db)
+    add_node(db, "spark-02")
+    db.create_deployment("dep-1", "demo-glm", "demo-glm", "deployment", {})
+    db.upsert_role(
+        "dep-1", "head", "spark-01", "heavy", 0, status="running", container_id="container-1"
+    )
+
+    db.upsert_role("dep-1", "head", "spark-02", "heavy", 0)
+
+    head = db.list_roles("dep-1")[0]
+    assert head["node_id"] == "spark-02"
+    assert head["status"] == "pending"
+    assert head["container_id"] is None
+
+
+def test_update_job_requires_a_field(db):
+    db.create_job("job-1", "load")
+
+    with pytest.raises(ValueError, match="no job fields"):
+        db.update_job("job-1")
 
 
 def test_role_upsert_preserves_status_and_container(db):
