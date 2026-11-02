@@ -26,6 +26,13 @@ class _ConnectionWrapper:
         else:
             setattr(self._connection, name, value)
 
+    def __enter__(self):
+        self._connection.__enter__()
+        return self
+
+    def __exit__(self, *exc_info):
+        return self._connection.__exit__(*exc_info)
+
     def execute(self, sql, *args):
         return self._connection.execute(sql, *args)
 
@@ -34,6 +41,13 @@ class _VacuumFailingConnection(_ConnectionWrapper):
     def execute(self, sql, *args):
         if sql.strip().upper().startswith("VACUUM"):
             raise sqlite3.OperationalError("disk I/O error")
+        return super().execute(sql, *args)
+
+
+class _VacuumLockedConnection(_ConnectionWrapper):
+    def execute(self, sql, *args):
+        if sql.strip().upper().startswith("VACUUM"):
+            raise sqlite3.OperationalError("database is locked")
         return super().execute(sql, *args)
 
 
@@ -780,6 +794,27 @@ def test_conversion_failure_is_reported(tmp_path, monkeypatch):
     with pytest.raises(DatabaseError, match="conversion failed"):
         Database(path)
 
+    connection = sqlite3.connect(path)
+    try:
+        assert connection.execute("PRAGMA user_version").fetchone()[0] == 1
+        assert connection.execute("PRAGMA auto_vacuum").fetchone()[0] == 0
+    finally:
+        connection.close()
+
+
+def test_conversion_blocked_is_reported(tmp_path, monkeypatch):
+    path = tmp_path / "fleet.sqlite"
+    _make_legacy_database(path)
+
+    real_connect = sqlite3.connect
+    monkeypatch.setattr(
+        "spark_fleet.shared.db.sqlite3.connect",
+        lambda *args, **kwargs: _VacuumLockedConnection(real_connect(*args, **kwargs)),
+    )
+
+    with pytest.raises(DatabaseError, match="conversion blocked"):
+        Database(path)
+
 
 def test_conversion_mode_check_rejects_noop(tmp_path, monkeypatch):
     path = tmp_path / "fleet.sqlite"
@@ -815,4 +850,7 @@ def test_failed_open_does_not_leak_connection(tmp_path):
             Database(path)
         gc.collect()
 
-    assert not any("unclosed" in str(warning.message).lower() for warning in caught)
+    assert not any(
+        issubclass(warning.category, ResourceWarning) and "unclosed" in str(warning.message).lower()
+        for warning in caught
+    )
