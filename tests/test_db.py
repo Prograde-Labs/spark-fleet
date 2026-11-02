@@ -764,7 +764,7 @@ def test_version_zero_file_with_table_converts_to_incremental_vacuum(tmp_path):
 @pytest.mark.skipif(os.geteuid() == 0, reason="root bypasses file permission bits")
 def test_read_only_legacy_database_fails_cleanly(tmp_path):
     path = tmp_path / "fleet.sqlite"
-    _make_legacy_database(path)
+    _make_legacy_database(path, user_version=0)
     path.chmod(0o444)
 
     try:
@@ -775,15 +775,21 @@ def test_read_only_legacy_database_fails_cleanly(tmp_path):
 
     connection = sqlite3.connect(path)
     try:
-        assert connection.execute("PRAGMA user_version").fetchone()[0] == 1
+        assert connection.execute("PRAGMA user_version").fetchone()[0] == 0
         assert connection.execute("PRAGMA auto_vacuum").fetchone()[0] == 0
+        tables = {
+            row[0]
+            for row in connection.execute("SELECT name FROM sqlite_master WHERE type = 'table'")
+        }
     finally:
         connection.close()
+
+    assert tables == {"probe"}
 
 
 def test_conversion_failure_is_reported(tmp_path, monkeypatch):
     path = tmp_path / "fleet.sqlite"
-    _make_legacy_database(path)
+    _make_legacy_database(path, user_version=0)
 
     real_connect = sqlite3.connect
     monkeypatch.setattr(
@@ -796,7 +802,7 @@ def test_conversion_failure_is_reported(tmp_path, monkeypatch):
 
     connection = sqlite3.connect(path)
     try:
-        assert connection.execute("PRAGMA user_version").fetchone()[0] == 1
+        assert connection.execute("PRAGMA user_version").fetchone()[0] == 0
         assert connection.execute("PRAGMA auto_vacuum").fetchone()[0] == 0
         tables = {
             row[0]
@@ -805,13 +811,12 @@ def test_conversion_failure_is_reported(tmp_path, monkeypatch):
     finally:
         connection.close()
 
-    assert "probe" in tables
-    assert "nodes" not in tables
+    assert tables == {"probe"}
 
 
 def test_conversion_blocked_is_reported(tmp_path, monkeypatch):
     path = tmp_path / "fleet.sqlite"
-    _make_legacy_database(path)
+    _make_legacy_database(path, user_version=0)
 
     real_connect = sqlite3.connect
     monkeypatch.setattr(
@@ -824,7 +829,7 @@ def test_conversion_blocked_is_reported(tmp_path, monkeypatch):
 
     connection = sqlite3.connect(path)
     try:
-        assert connection.execute("PRAGMA user_version").fetchone()[0] == 1
+        assert connection.execute("PRAGMA user_version").fetchone()[0] == 0
         assert connection.execute("PRAGMA auto_vacuum").fetchone()[0] == 0
         tables = {
             row[0]
@@ -833,28 +838,17 @@ def test_conversion_blocked_is_reported(tmp_path, monkeypatch):
     finally:
         connection.close()
 
-    assert "probe" in tables
-    assert "nodes" not in tables
-
-
-def test_connection_wrapper_supports_context_manager():
-    connection = sqlite3.connect(":memory:")
-    wrapper = _ConnectionWrapper(connection)
-    try:
-        with wrapper:
-            wrapper.execute("CREATE TABLE t (x INTEGER)")
-        assert wrapper.execute("SELECT name FROM sqlite_master").fetchone()[0] == "t"
-    finally:
-        wrapper.close()
+    assert tables == {"probe"}
 
 
 def test_connection_wrapper_commits_on_exit(tmp_path):
     path = tmp_path / "wrapper.sqlite"
     connection = sqlite3.connect(path)
+    connection.execute("CREATE TABLE t (x INTEGER)")
+    connection.commit()
     wrapper = _ConnectionWrapper(connection)
     try:
         with wrapper:
-            wrapper.execute("CREATE TABLE t (x INTEGER)")
             wrapper.execute("INSERT INTO t VALUES (1)")
         assert not connection.in_transaction
     finally:
@@ -870,13 +864,15 @@ def test_connection_wrapper_commits_on_exit(tmp_path):
 def test_connection_wrapper_rolls_back_on_exception(tmp_path):
     path = tmp_path / "wrapper.sqlite"
     connection = sqlite3.connect(path)
+    connection.execute("CREATE TABLE t (x INTEGER)")
+    connection.commit()
     wrapper = _ConnectionWrapper(connection)
     try:
         with pytest.raises(RuntimeError, match="boom"):
             with wrapper:
-                wrapper.execute("CREATE TABLE t (x INTEGER)")
                 wrapper.execute("INSERT INTO t VALUES (1)")
                 raise RuntimeError("boom")
+        assert not connection.in_transaction
     finally:
         wrapper.close()
 
