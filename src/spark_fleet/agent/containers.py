@@ -75,12 +75,12 @@ def managed_containers(
         ids = [row["ID"] for row in rows if isinstance(row.get("ID"), str) and row["ID"]]
         if not ids:
             raise ContainerError("docker ps returned containers without IDs")
-        inspections = _inspect_containers(ids)
     except docker_ops.DockerError as exc:
         raise ContainerError(str(exc)) from exc
 
-    # Memory sampling is best-effort: a container may vanish mid-redeploy and a
-    # failed stats call must not hide the state/labels of the others.
+    # Inspect and stats are enrichment: a container may vanish mid-redeploy, so
+    # fall back to the `docker ps` fields instead of failing the whole listing.
+    inspections = _inspect_containers(ids)
     try:
         samples = docker_ops.container_stats(ids)
     except docker_ops.DockerError:
@@ -97,9 +97,6 @@ def managed_containers(
         if not isinstance(container_id, str) or not container_id:
             raise ContainerError(f"docker ps returned a container without an ID: {row!r}")
         record = _match(inspected, container_id)
-        if record is None:
-            # The container disappeared between `docker ps` and `docker inspect`.
-            continue
         infos.append(_container_info(container_id, row, record, _match(sampled, container_id)))
     return infos
 
@@ -107,18 +104,17 @@ def managed_containers(
 def _inspect_containers(ids: list[str]) -> list[dict[str, Any]]:
     try:
         return docker_ops.inspect_containers(ids)
-    except docker_ops.DockerError as exc:
-        if len(ids) == 1:
-            raise
-        records: list[dict[str, Any]] = []
-        for container_id in ids:
-            try:
-                records.extend(docker_ops.inspect_containers([container_id]))
-            except docker_ops.DockerError:
-                continue
-        if not records:
-            raise exc
-        return records
+    except docker_ops.DockerError:
+        pass
+    if len(ids) == 1:
+        return []
+    records: list[dict[str, Any]] = []
+    for container_id in ids:
+        try:
+            records.extend(docker_ops.inspect_containers([container_id]))
+        except docker_ops.DockerError:
+            continue
+    return records
 
 
 def container_logs(container_id: str, *, tail: int = 200) -> str:
@@ -168,41 +164,63 @@ def parse_size(text: str) -> int | None:
 def _container_info(
     container_id: str,
     row: Mapping[str, Any],
-    record: Mapping[str, Any],
+    record: Mapping[str, Any] | None,
     sample: Mapping[str, Any] | None,
 ) -> ContainerInfo:
-    state = record.get("State")
-    state = state if isinstance(state, Mapping) else {}
-    health_data = state.get("Health")
-    health = health_data.get("Status") if isinstance(health_data, Mapping) else None
+    labels: dict[str, str] = {}
+    health: str | None = None
+    state_text = ""
+    name = ""
+
+    if isinstance(record, Mapping):
+        state = record.get("State")
+        state = state if isinstance(state, Mapping) else {}
+        health_data = state.get("Health")
+        health = health_data.get("Status") if isinstance(health_data, Mapping) else None
+        config = record.get("Config")
+        raw_labels = config.get("Labels") if isinstance(config, Mapping) else None
+        if isinstance(raw_labels, Mapping):
+            labels = dict(raw_labels)
+        raw_name = record.get("Name")
+        if isinstance(raw_name, str):
+            name = raw_name.lstrip("/")
+        raw_state = state.get("Status")
+        if isinstance(raw_state, str):
+            state_text = raw_state
+
+    if not labels:
+        raw_labels = row.get("Labels")
+        labels = docker_ops.parse_labels(raw_labels if isinstance(raw_labels, str) else None)
+    if not name:
+        raw_name = row.get("Names")
+        name = raw_name if isinstance(raw_name, str) else ""
+    if not state_text:
+        raw_state = row.get("State")
+        state_text = raw_state if isinstance(raw_state, str) else ""
+
+    status = row.get("Status") if isinstance(row.get("Status"), str) else ""
     if not isinstance(health, str):
-        health = None
-
-    config = record.get("Config")
-    labels = config.get("Labels") if isinstance(config, Mapping) else None
-    labels = dict(labels) if isinstance(labels, Mapping) else {}
-
-    name = record.get("Name")
-    if not isinstance(name, str) or not name:
-        name = row.get("Names") if isinstance(row.get("Names"), str) else ""
-    name = name.lstrip("/")
-
-    state_text = state.get("Status")
-    if not isinstance(state_text, str) or not state_text:
-        state_text = row.get("State") if isinstance(row.get("State"), str) else ""
+        health = _health_from_status(status)
 
     usage, limit, percent = _memory(sample)
     return ContainerInfo(
         id=container_id,
         name=name,
         state=state_text,
-        status=row.get("Status") if isinstance(row.get("Status"), str) else "",
+        status=status,
         health=health,
         memory_usage=usage,
         memory_limit=limit,
         memory_percent=percent,
         labels=labels,
     )
+
+
+def _health_from_status(status: str) -> str | None:
+    for health in ("healthy", "unhealthy", "starting"):
+        if f"({health})" in status or f"(health: {health})" in status:
+            return health
+    return None
 
 
 def _memory(sample: Mapping[str, Any] | None) -> tuple[int | None, int | None, float | None]:

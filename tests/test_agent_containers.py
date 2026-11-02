@@ -233,6 +233,35 @@ def test_follow_container_logs_streams_and_terminates(monkeypatch):
     assert process.waited is True
 
 
+class SlowTerminateProcess(FakeProcess):
+    def __init__(self, lines):
+        super().__init__(lines)
+        self.wait_calls = 0
+        self.killed = False
+
+    def wait(self, timeout=None):
+        self.wait_calls += 1
+        if self.wait_calls == 1:
+            raise subprocess.TimeoutExpired("docker", timeout)
+        self.waited = True
+        return 0
+
+
+def test_follow_container_logs_kills_unresponsive_process(monkeypatch):
+    process = SlowTerminateProcess(["one\n"])
+    monkeypatch.setattr(
+        docker_ops.subprocess,
+        "Popen",
+        lambda args, **kwargs: process,
+    )
+
+    assert list(docker_ops.follow_container_logs("abc")) == ["one\n"]
+    assert process.terminated is True
+    assert process.killed is True
+    assert process.wait_calls == 2
+    assert process.waited is True
+
+
 # managed_containers -------------------------------------------------------
 
 
@@ -289,10 +318,16 @@ def test_managed_containers_without_containers_skips_inspect(monkeypatch):
     assert calls["stats"] == []
 
 
-def test_managed_containers_skips_missing_inspection(monkeypatch):
+def test_managed_containers_falls_back_to_ps_when_inspect_missing(monkeypatch):
     patch_listing(monkeypatch, inspections=[])
 
-    assert managed_containers("demo-glm") == []
+    infos = managed_containers("demo-glm")
+
+    assert len(infos) == 1
+    assert infos[0].id == "abc123def456"
+    assert infos[0].state == "running"
+    assert infos[0].health == "healthy"
+    assert infos[0].labels == {LABEL_DEPLOYMENT: "demo-glm", LABEL_ROLE: "head"}
 
 
 def test_managed_containers_handles_multiple_containers(monkeypatch):
@@ -311,14 +346,16 @@ def test_managed_containers_handles_multiple_containers(monkeypatch):
     assert [info.memory_percent for info in infos] == [12.5, 25.0]
 
 
-def test_managed_containers_skips_container_removed_mid_redeploy(monkeypatch):
+def test_managed_containers_uses_ps_fields_for_removed_container(monkeypatch):
     rows = [ps_row("aaa111"), ps_row("bbb222")]
     inspections = [inspect_record("aaa111")]
     patch_listing(monkeypatch, rows=rows, inspections=inspections, samples=[])
 
     infos = managed_containers("demo-glm")
 
-    assert [info.id for info in infos] == ["aaa111"]
+    assert [info.id for info in infos] == ["aaa111", "bbb222"]
+    assert infos[1].state == "running"
+    assert infos[1].labels[LABEL_DEPLOYMENT] == "demo-glm"
 
 
 def test_managed_containers_retries_inspection_per_container(monkeypatch):
@@ -328,6 +365,8 @@ def test_managed_containers_retries_inspection_per_container(monkeypatch):
     def fake_inspect(ids, **kwargs):
         calls.append(list(ids))
         if len(ids) > 1:
+            raise docker_ops.DockerError("no such container: bbb222")
+        if ids[0] == "bbb222":
             raise docker_ops.DockerError("no such container: bbb222")
         return [inspect_record(ids[0])]
 
@@ -344,6 +383,28 @@ def test_managed_containers_retries_inspection_per_container(monkeypatch):
 
     assert calls == [["aaa111", "bbb222"], ["aaa111"], ["bbb222"]]
     assert [info.id for info in infos] == ["aaa111", "bbb222"]
+    assert infos[1].labels == {LABEL_DEPLOYMENT: "demo-glm", LABEL_ROLE: "head"}
+
+
+def test_managed_containers_falls_back_when_all_inspections_fail(monkeypatch):
+    rows = [ps_row("aaa111"), ps_row("bbb222")]
+
+    def fake_inspect(ids, **kwargs):
+        raise docker_ops.DockerError("docker inspect failed")
+
+    monkeypatch.setattr(
+        "spark_fleet.agent.containers.docker_ops.list_containers_by_labels",
+        lambda filters, **kwargs: rows,
+    )
+    monkeypatch.setattr("spark_fleet.agent.containers.docker_ops.inspect_containers", fake_inspect)
+    monkeypatch.setattr(
+        "spark_fleet.agent.containers.docker_ops.container_stats", lambda *a, **k: []
+    )
+
+    infos = managed_containers("demo-glm")
+
+    assert [info.id for info in infos] == ["aaa111", "bbb222"]
+    assert all(info.labels[LABEL_DEPLOYMENT] == "demo-glm" for info in infos)
 
 
 def test_managed_containers_wraps_docker_errors(monkeypatch):
@@ -356,7 +417,7 @@ def test_managed_containers_wraps_docker_errors(monkeypatch):
         managed_containers("demo-glm")
 
 
-def test_managed_containers_wraps_inspect_errors(monkeypatch):
+def test_managed_containers_falls_back_when_inspect_errors(monkeypatch):
     patch_listing(monkeypatch)
 
     def fail(*args, **kwargs):
@@ -364,8 +425,11 @@ def test_managed_containers_wraps_inspect_errors(monkeypatch):
 
     monkeypatch.setattr("spark_fleet.agent.containers.docker_ops.inspect_containers", fail)
 
-    with pytest.raises(ContainerError, match="inspect failed"):
-        managed_containers("demo-glm")
+    infos = managed_containers("demo-glm")
+
+    assert len(infos) == 1
+    assert infos[0].state == "running"
+    assert infos[0].labels[LABEL_DEPLOYMENT] == "demo-glm"
 
 
 def test_managed_containers_degrades_when_stats_fail(monkeypatch):
@@ -386,6 +450,7 @@ def test_managed_containers_degrades_when_stats_fail(monkeypatch):
 def test_managed_containers_reports_missing_health(monkeypatch):
     patch_listing(
         monkeypatch,
+        rows=[ps_row(status="Up 2 minutes")],
         inspections=[inspect_record(health=None)],
         samples=[],
     )
