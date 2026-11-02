@@ -1,0 +1,134 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  color-scheme: dark;
+  --grid-line: rgba(103, 232, 249, 0.035);
+  --hud-line: rgba(43, 58, 82, 0.65);
+  --cyan-glow: rgba(34, 211, 238, 0.18);
+  --violet-glow: rgba(167, 139, 250, 0.14);
+}
+
+html,
+body,
+#app {
+  height: 100%;
+}
+
+body {
+  @apply bg-void text-ink font-sans antialiased;
+  background-image:
+    radial-gradient(circle at 12% -10%, var(--cyan-glow), transparent 38%),
+    radial-gradient(circle at 88% 4%, var(--violet-glow), transparent 34%),
+    linear-gradient(var(--grid-line) 1px, transparent 1px),
+    linear-gradient(90deg, var(--grid-line) 1px, transparent 1px);
+  background-size: 100% 100%, 100% 100%, 44px 44px, 44px 44px;
+  background-attachment: fixed;
+}
+
+::selection {
+  background: rgba(34, 211, 238, 0.3);
+  color: #fff;
+}
+
+::-webkit-scrollbar {
+  width: 9px;
+  height: 9px;
+}
+
+::-webkit-scrollbar-track {
+  background: #08090d;
+}
+
+::-webkit-scrollbar-thumb {
+  background: #1d2637;
+  border-radius: 999px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: #2b3a52;
+}
+
+@layer components {
+  .panel {
+    @apply rounded-xl border border-edge bg-panel/80 shadow-panel backdrop-blur-sm;
+  }
+
+  .panel-raised {
+    @apply rounded-xl border border-edge bg-raised/70 shadow-panel;
+  }
+
+  .hud-label {
+    @apply font-mono text-[10px] uppercase tracking-hud text-faint;
+  }
+
+  .hud-value {
+    @apply font-mono text-sm text-ink;
+  }
+
+  .divider {
+    @apply h-px w-full bg-gradient-to-r from-transparent via-edgeBright/70 to-transparent;
+  }
+
+  .btn {
+    @apply inline-flex items-center justify-center gap-2 rounded-md border border-edge bg-raised px-3 py-1.5 font-mono text-[11px] uppercase tracking-[0.12em] text-dim transition hover:border-edgeBright hover:text-ink disabled:cursor-not-allowed disabled:opacity-40;
+  }
+
+  .btn-primary {
+    @apply border-cyan/40 bg-cyan/10 text-cyan-soft hover:border-cyan hover:bg-cyan/15 hover:text-cyan-soft;
+  }
+
+  .btn-violet {
+    @apply border-violet/40 bg-violet/10 text-violet-soft hover:border-violet hover:bg-violet/15;
+  }
+
+  .btn-danger {
+    @apply border-danger/40 bg-danger/10 text-danger hover:border-danger hover:bg-danger/15;
+  }
+
+  .input {
+    @apply w-full rounded-md border border-edge bg-void/70 px-3 py-2 font-mono text-xs text-ink placeholder:text-faint focus:border-cyan/60 focus:outline-none focus:ring-1 focus:ring-cyan/30;
+  }
+
+  .chip {
+    @apply inline-flex items-center gap-1.5 rounded-full border border-edge bg-void/60 px-2.5 py-1 font-mono text-[10px] uppercase tracking-[0.12em] text-dim;
+  }
+
+  .chip-live {
+    @apply border-signal/40 text-signal;
+  }
+
+  .chip-warn {
+    @apply border-warning/40 text-warning;
+  }
+
+  .chip-danger {
+    @apply border-danger/40 text-danger;
+  }
+
+  .glow-line {
+    @apply h-px bg-gradient-to-r from-transparent via-cyan/50 to-transparent;
+  }
+
+  .stat-value {
+    @apply font-mono text-2xl font-semibold tracking-tight text-ink;
+  }
+}
+
+@layer utilities {
+  .text-balance {
+    text-wrap: balance;
+  }
+
+  .bg-grid-fade {
+    background-image:
+      linear-gradient(var(--hud-line) 1px, transparent 1px),
+      linear-gradient(90deg, var(--hud-line) 1px, transparent 1px);
+    background-size: 22px 22px;
+  }
+
+  .mask-fade-b {
+    mask-image: linear-gradient(to bottom, black 55%, transparent 100%);
+  }
+}
