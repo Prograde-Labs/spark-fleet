@@ -1,5 +1,6 @@
 """Tests for the SQLite state store."""
 
+import os
 import sqlite3
 
 import pytest
@@ -681,6 +682,8 @@ def test_version_zero_file_with_table_converts_to_incremental_vacuum(tmp_path):
     path = tmp_path / "fleet.sqlite"
     connection = sqlite3.connect(path)
     connection.execute("CREATE TABLE probe (x INTEGER)")
+    connection.execute("INSERT INTO probe VALUES (7)")
+    connection.commit()
     connection.execute("PRAGMA auto_vacuum = NONE")
     connection.execute("VACUUM")
     connection.execute("PRAGMA user_version = 0")
@@ -695,7 +698,14 @@ def test_version_zero_file_with_table_converts_to_incremental_vacuum(tmp_path):
     finally:
         database.close()
 
+    connection = sqlite3.connect(path)
+    try:
+        assert connection.execute("SELECT x FROM probe").fetchone()[0] == 7
+    finally:
+        connection.close()
 
+
+@pytest.mark.skipif(os.geteuid() == 0, reason="root bypasses file permission bits")
 def test_read_only_legacy_database_fails_cleanly(tmp_path):
     path = tmp_path / "fleet.sqlite"
     connection = sqlite3.connect(path)
@@ -708,7 +718,7 @@ def test_read_only_legacy_database_fails_cleanly(tmp_path):
     path.chmod(0o444)
 
     try:
-        with pytest.raises(DatabaseError, match="open failed"):
+        with pytest.raises(DatabaseError, match="conversion failed"):
             Database(path)
     finally:
         path.chmod(0o644)
@@ -727,6 +737,7 @@ def test_failed_open_does_not_leak_connection(tmp_path):
     connection.commit()
     connection.close()
 
+    gc.collect()
     with warnings.catch_warnings(record=True) as caught:
         warnings.simplefilter("always")
         with pytest.raises(DatabaseError, match="newer"):
