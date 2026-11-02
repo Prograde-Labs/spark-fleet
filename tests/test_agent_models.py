@@ -86,7 +86,7 @@ def test_scan_reports_empty_cache_dir_as_partial(tmp_path):
     assert entry.size_bytes == 0
 
 
-def test_scan_prefers_cached_when_incomplete_files_are_present(tmp_path):
+def test_scan_reports_incomplete_blobs_as_partial(tmp_path):
     root = tmp_path / "hub"
     path = write_cached(root, "org/name", b"{}")
     (path / "blobs").mkdir()
@@ -94,6 +94,13 @@ def test_scan_prefers_cached_when_incomplete_files_are_present(tmp_path):
 
     entry = ModelCatalog([root]).scan().models[0]
 
+    assert entry.cached is False
+    assert entry.partial is True
+    assert entry.size_bytes == 12
+
+    (path / "blobs" / "weights.incomplete").unlink()
+
+    entry = ModelCatalog([root]).scan().models[0]
     assert entry.cached is True
     assert entry.partial is False
 
@@ -330,14 +337,14 @@ def test_download_rejects_cancelled_request_before_start(tmp_path, monkeypatch):
         ModelCatalog([tmp_path / "hub"]).download("org/name", cancel_event=cancel)
 
 
-def test_download_reports_progress(tmp_path, monkeypatch):
+def test_download_reports_aggregate_progress(tmp_path, monkeypatch):
     progress = []
 
     def fake(repo_id, *, cache_dir, tqdm_class, **kwargs):
-        bar = tqdm_class(desc="config.json", total=10, unit="B", file=io.StringIO())
-        bar.update(4)
-        bar.update(6)
-        bar.close()
+        transfer = tqdm_class(desc="Downloading bytes", total=100, unit="B", file=io.StringIO())
+        transfer.update(40)
+        files = tqdm_class(desc="Fetching 2 files", total=2, file=io.StringIO())
+        files.update(1)
         return str(cache_dir)
 
     monkeypatch.setattr(models, "snapshot_download", fake)
@@ -345,8 +352,20 @@ def test_download_reports_progress(tmp_path, monkeypatch):
     ModelCatalog([tmp_path / "hub"]).download("org/name", on_progress=progress.append)
 
     assert progress == [
-        {"repo": "org/name", "file": "config.json", "done": 4, "total": 10},
-        {"repo": "org/name", "file": "config.json", "done": 10, "total": 10},
+        {
+            "repo": "org/name",
+            "phase": "Downloading bytes",
+            "unit": "B",
+            "done": 40,
+            "total": 100,
+        },
+        {
+            "repo": "org/name",
+            "phase": "Fetching 2 files",
+            "unit": "it",
+            "done": 1,
+            "total": 2,
+        },
     ]
 
 
@@ -354,7 +373,7 @@ def test_download_cancel_event_aborts_progress(tmp_path, monkeypatch):
     cancel = threading.Event()
 
     def fake(repo_id, *, cache_dir, tqdm_class, **kwargs):
-        bar = tqdm_class(desc="config.json", total=10, unit="B", file=io.StringIO())
+        bar = tqdm_class(desc="Downloading bytes", total=10, unit="B", file=io.StringIO())
         bar.update(1)
         cancel.set()
         bar.update(1)
@@ -368,7 +387,7 @@ def test_download_cancel_event_aborts_progress(tmp_path, monkeypatch):
 
 def test_download_survives_progress_observer_failure(tmp_path, monkeypatch, caplog):
     def fake(repo_id, *, cache_dir, tqdm_class, **kwargs):
-        bar = tqdm_class(desc="config.json", total=1, unit="B", file=io.StringIO())
+        bar = tqdm_class(desc="Downloading bytes", total=1, unit="B", file=io.StringIO())
         bar.update(1)
         return str(cache_dir)
 
@@ -475,8 +494,10 @@ def test_disk_usage_sums_roots(tmp_path):
 
 def quick_download(cache_root: Path):
     def fake(repo_id, *, cache_dir, tqdm_class, **kwargs):
-        bar = tqdm_class(desc="model.safetensors", total=100, unit="B", file=io.StringIO())
-        bar.update(100)
+        transfer = tqdm_class(desc="Downloading bytes", total=100, unit="B", file=io.StringIO())
+        transfer.update(100)
+        files = tqdm_class(desc="Fetching 1 files", total=1, file=io.StringIO())
+        files.update(1)
         target = Path(cache_dir) / f"models--{repo_id.replace('/', '--')}" / "snapshots" / "rev"
         target.mkdir(parents=True)
         (target / "config.json").write_text("{}")
@@ -499,7 +520,9 @@ def test_job_manager_runs_download_and_reports_success(tmp_path, monkeypatch):
     assert status.root == root
     assert status.state == "succeeded"
     assert status.error is None
-    assert status.file == "model.safetensors"
+    assert status.phase == "Fetching 1 files"
+    assert status.files_done == 1
+    assert status.files_total == 1
     assert status.bytes_done == 100
     assert status.bytes_total == 100
     assert status.started_at is not None
@@ -514,7 +537,7 @@ def test_job_manager_reports_live_progress(tmp_path, monkeypatch):
     release = threading.Event()
 
     def fake(repo_id, *, cache_dir, tqdm_class, **kwargs):
-        bar = tqdm_class(desc="model.safetensors", total=100, unit="B", file=io.StringIO())
+        bar = tqdm_class(desc="Downloading bytes", total=100, unit="B", file=io.StringIO())
         bar.update(25)
         started.set()
         release.wait(2)
@@ -529,6 +552,7 @@ def test_job_manager_reports_live_progress(tmp_path, monkeypatch):
 
     live = manager.status(job_id)
     assert live.state == "running"
+    assert live.phase == "Downloading bytes"
     assert live.bytes_done == 25
     assert live.bytes_total == 100
 
@@ -559,7 +583,7 @@ def test_job_manager_cancels_running_download(tmp_path, monkeypatch):
 
     def fake(repo_id, *, cache_dir, tqdm_class, **kwargs):
         started.set()
-        bar = tqdm_class(desc="model.safetensors", total=100, unit="B", file=io.StringIO())
+        bar = tqdm_class(desc="Downloading bytes", total=100, unit="B", file=io.StringIO())
         while True:
             bar.update(1)
             time.sleep(0.01)
@@ -656,3 +680,46 @@ def test_job_manager_refuses_removal_while_downloading(tmp_path, monkeypatch):
 
     manager.cancel(job_id)
     manager.wait(job_id, timeout=2)
+
+
+def test_job_manager_serializes_removal_with_new_downloads(tmp_path, monkeypatch):
+    root = tmp_path / "hub"
+    catalog = ModelCatalog([root])
+    manager = ModelJobManager(catalog)
+    remove_started = threading.Event()
+    release_remove = threading.Event()
+    resolved = threading.Event()
+    download_started = threading.Event()
+
+    def slow_remove(repo, **kwargs):
+        remove_started.set()
+        release_remove.wait(2)
+
+    original_resolve = catalog.resolve_root
+
+    def tracking_resolve(*args, **kwargs):
+        resolved.set()
+        return original_resolve(*args, **kwargs)
+
+    monkeypatch.setattr(catalog, "remove", slow_remove)
+    monkeypatch.setattr(catalog, "resolve_root", tracking_resolve)
+    monkeypatch.setattr(
+        models,
+        "snapshot_download",
+        lambda *args, **kwargs: download_started.set() or str(root),
+    )
+
+    remover = threading.Thread(target=manager.remove, args=("org/name",), kwargs={"confirm": True})
+    remover.start()
+    assert remove_started.wait(1)
+
+    starter = threading.Thread(target=manager.start, args=("org/name",))
+    starter.start()
+    assert resolved.wait(1)
+    assert download_started.is_set() is False
+
+    release_remove.set()
+    remover.join(1)
+    starter.join(1)
+
+    assert download_started.wait(1)

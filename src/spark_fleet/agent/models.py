@@ -71,7 +71,9 @@ class ModelJobStatus:
     repo: str
     root: Path
     state: str
-    file: str | None
+    phase: str | None
+    files_done: int
+    files_total: int | None
     bytes_done: int
     bytes_total: int | None
     error: str | None
@@ -88,7 +90,9 @@ class _Job:
     revision: str | None
     allow_patterns: list[str] | None
     state: str = "pending"
-    file: str | None = None
+    phase: str | None = None
+    files_done: int = 0
+    files_total: int | None = None
     bytes_done: int = 0
     bytes_total: int | None = None
     error: str | None = None
@@ -308,7 +312,7 @@ class ModelJobManager:
         with self._lock:
             if any(job.repo == repo and job.state in _ACTIVE_STATES for job in self._jobs.values()):
                 raise ModelError(f"download in progress for {repo}")
-        self._catalog.remove(repo, root=root, confirm=confirm, in_use=in_use)
+            self._catalog.remove(repo, root=root, confirm=confirm, in_use=in_use)
 
     def _job(self, job_id: str) -> _Job:
         job = self._jobs.get(job_id)
@@ -323,12 +327,19 @@ class ModelJobManager:
 
         def observer(progress: dict) -> None:
             with self._lock:
-                job.file = progress.get("file")
+                job.phase = progress.get("phase")
+                unit = progress.get("unit")
                 done = progress.get("done")
-                if isinstance(done, (int, float)):
-                    job.bytes_done = int(done)
                 total = progress.get("total")
-                job.bytes_total = int(total) if isinstance(total, (int, float)) else None
+                if unit == "it":
+                    if isinstance(done, (int, float)):
+                        job.files_done = int(done)
+                    job.files_total = int(total) if isinstance(total, (int, float)) else None
+                else:
+                    if isinstance(done, (int, float)):
+                        job.bytes_done = max(job.bytes_done, int(done))
+                    if isinstance(total, (int, float)):
+                        job.bytes_total = max(job.bytes_total or 0, int(total))
 
         try:
             if job.cancel_event.is_set():
@@ -369,7 +380,9 @@ def _snapshot(job: _Job) -> ModelJobStatus:
         repo=job.repo,
         root=job.root,
         state=job.state,
-        file=job.file,
+        phase=job.phase,
+        files_done=job.files_done,
+        files_total=job.files_total,
         bytes_done=job.bytes_done,
         bytes_total=job.bytes_total,
         error=job.error,
@@ -385,6 +398,7 @@ def _progress_class(repo: str, on_progress, cancel_event: threading.Event | None
     class Progress(tqdm):
         def __init__(self, *args, **kwargs):
             self._fleet_desc = kwargs.get("desc")
+            self._fleet_unit = kwargs.get("unit") or "it"
             super().__init__(*args, **kwargs)
 
         def update(self, n=1):
@@ -394,11 +408,13 @@ def _progress_class(repo: str, on_progress, cancel_event: threading.Event | None
             result = super().update(n)
             if on_progress is not None:
                 desc = getattr(self, "desc", None) or self._fleet_desc
+                unit = getattr(self, "unit", None) or self._fleet_unit
                 try:
                     on_progress(
                         {
                             "repo": repo,
-                            "file": desc if isinstance(desc, str) else None,
+                            "phase": desc if isinstance(desc, str) else None,
+                            "unit": unit,
                             "done": self.n,
                             "total": self.total,
                         }
@@ -463,7 +479,7 @@ def _repo_from_cache_dir(name: str) -> str | None:
 
 def _model_entry(root: Path, path: Path, repo: str) -> ModelEntry:
     try:
-        cached = _snapshot_files(path)
+        cached = _snapshot_files(path) and not _has_incomplete_files(path)
         size_bytes = _directory_size(path)
     except OSError as exc:
         return ModelEntry(
@@ -491,6 +507,12 @@ def _snapshot_files(path: Path) -> bool:
     if not snapshots.is_dir():
         return False
     return any(candidate.is_file() for candidate in snapshots.rglob("*"))
+
+
+def _has_incomplete_files(path: Path) -> bool:
+    """A cache entry with ``.incomplete`` blobs is an interrupted download."""
+
+    return any(candidate.name.endswith(".incomplete") for candidate in path.rglob("*"))
 
 
 def _directory_size(directory: Path, seen: set[tuple[int, int]] | None = None) -> int:
