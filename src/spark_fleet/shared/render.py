@@ -234,12 +234,13 @@ def _resolve_value(value: Any, context: Mapping[str, str]) -> Any:
     if isinstance(value, list):
         return [_resolve_value(item, context) for item in value]
     if isinstance(value, dict):
-        return {
-            (_resolve_value(key, context) if isinstance(key, str) else key): _resolve_value(
-                item, context
-            )
-            for key, item in value.items()
-        }
+        resolved: dict[Any, Any] = {}
+        for key, item in value.items():
+            new_key = _resolve_value(key, context) if isinstance(key, str) else key
+            if new_key in resolved:
+                raise RenderError(f"duplicate key after placeholder resolution: {new_key!r}")
+            resolved[new_key] = _resolve_value(item, context)
+        return resolved
     return value
 
 
@@ -257,8 +258,11 @@ def _check_placeholder_syntax(value: str) -> None:
         nested = value.find("{{", start + 2)
         if nested != -1 and nested < end:
             raise RenderError(f"malformed placeholder: {value!r}")
-        if not value[start + 2 : end].strip():
+        content = value[start + 2 : end]
+        if not content.strip():
             raise RenderError(f"empty placeholder: {value!r}")
+        if "{" in content or "}" in content:
+            raise RenderError(f"malformed placeholder: {value!r}")
         index = end + 2
 
 

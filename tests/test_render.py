@@ -485,13 +485,34 @@ def test_brace_only_placeholder_rejected():
         render(parse_recipe(data))
 
 
-def test_resolved_value_may_contain_braces():
+@pytest.mark.parametrize("deployment_id", ["id}}x", "x{{y", "{{both}}"])
+def test_resolved_value_may_contain_braces(deployment_id):
     data = copy.deepcopy(DEPLOYMENT)
     data["spec"]["roles"][0]["service"]["environment"]["ID"] = "{{ deployment.id }}"
 
-    rendered = render(parse_recipe(data), deployment_id="id}}x")
+    rendered = render(parse_recipe(data), deployment_id=deployment_id)
 
-    assert rendered[0].compose["services"]["workload"]["environment"]["ID"] == "id}}x"
+    assert rendered[0].compose["services"]["workload"]["environment"]["ID"] == deployment_id
+
+
+@pytest.mark.parametrize("value", ["{{ a{b }}", "{{ a}b }}", "{{ deployment.id} }}"])
+def test_malformed_placeholder_body_rejected(value):
+    data = copy.deepcopy(DEPLOYMENT)
+    data["spec"]["roles"][0]["service"]["environment"]["BAD"] = value
+
+    with pytest.raises(RenderError, match="malformed placeholder"):
+        render(parse_recipe(data))
+
+
+def test_duplicate_key_after_resolution_rejected():
+    data = copy.deepcopy(DEPLOYMENT)
+    data["spec"]["roles"][0]["service"]["environment"] = {
+        "{{ deployment.name }}": "x",
+        "demo-glm": "y",
+    }
+
+    with pytest.raises(RenderError, match="duplicate key after placeholder resolution"):
+        render(parse_recipe(data))
 
 
 def test_literal_braces_are_preserved():
