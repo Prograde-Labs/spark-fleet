@@ -650,6 +650,8 @@ def _read_recipe(recipes_dir: Path, name: str) -> Recipe:
         return parse_recipe_yaml(path.read_text(encoding="utf-8"))
     except OSError as exc:
         raise HTTPException(status_code=404, detail=f"recipe {name!r} not found") from exc
+    except UnicodeDecodeError as exc:
+        raise HTTPException(status_code=400, detail=f"recipe {name!r} is not valid UTF-8") from exc
     except RecipeError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
@@ -797,7 +799,7 @@ def _is_stale(deployment: Mapping[str, Any], recipes_dir: Path) -> bool:
     try:
         path = _recipe_path(recipes_dir, deployment["recipe_name"])
         recipe = parse_recipe_yaml(path.read_text(encoding="utf-8"))
-    except (HTTPException, OSError, RecipeError):
+    except (HTTPException, OSError, UnicodeDecodeError, RecipeError):
         return False
     current = recipe.model_dump(by_alias=True, exclude_unset=True)
     return json.dumps(deployment["recipe"], sort_keys=True, default=str) != json.dumps(

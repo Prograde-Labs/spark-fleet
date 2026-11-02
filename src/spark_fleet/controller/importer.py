@@ -126,7 +126,7 @@ class ImportPlan:
             for path in recipes_dir.glob("*.yaml"):
                 try:
                     other = parse_recipe_yaml(path.read_text(encoding="utf-8"))
-                except (OSError, RecipeError):
+                except (OSError, UnicodeDecodeError, RecipeError):
                     continue
                 overlap = aliases & _aliases(other)
                 if overlap:

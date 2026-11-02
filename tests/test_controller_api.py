@@ -1063,3 +1063,15 @@ def test_redeploy_falls_back_when_recipe_file_is_corrupt(env):
 
     assert response.status_code == 200
     assert env.deployments.calls[-1][3].metadata.name == "glm"
+
+
+def test_redeploy_falls_back_when_recipe_file_is_not_utf8(env):
+    add_node(env.client)
+    add_recipe(env, "glm")
+    add_deployment(env.db)
+    env.recipes_dir.joinpath("glm.yaml").write_bytes(b"\xff\xfe\x00")
+
+    response = env.client.post("/api/deployments/dep-1/redeploy")
+
+    assert response.status_code == 200
+    assert env.deployments.calls[-1][3].metadata.name == "glm"
