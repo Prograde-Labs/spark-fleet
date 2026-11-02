@@ -804,7 +804,7 @@ async def test_cancelled_load_stops_roles_and_clears_primary(db, registry, runne
     assert deployment["is_primary"] is False
     roles = {role["role_name"]: role["status"] for role in db.list_roles("dep-1")}
     assert roles["worker"] == "stopped"
-    assert roles["head"] == "stopped"
+    assert "head" not in roles
     assert ("down", "spark-fleet-demo-glm-worker") in agents[NODE_02_URL].calls
 
 
