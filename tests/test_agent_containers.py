@@ -157,6 +157,18 @@ def test_container_logs_builds_command(monkeypatch):
     assert calls[0][1]["stdout"] is subprocess.PIPE
     assert calls[0][1]["stderr"] is subprocess.STDOUT
     assert calls[0][1]["text"] is True
+    assert calls[0][1]["errors"] == "replace"
+
+
+def test_container_logs_failure_raises_with_output(monkeypatch):
+    monkeypatch.setattr(
+        docker_ops.subprocess,
+        "run",
+        lambda args, **kwargs: completed(args, returncode=1, stdout="boom\n"),
+    )
+
+    with pytest.raises(docker_ops.DockerError, match="boom"):
+        docker_ops.container_logs("abc")
 
 
 def test_container_stats_builds_command(monkeypatch):
@@ -216,6 +228,7 @@ def test_follow_container_logs_streams_and_terminates(monkeypatch):
     assert calls[0][0] == ["docker", "logs", "--follow", "--tail", "10", "abc"]
     assert calls[0][1]["stderr"] is subprocess.STDOUT
     assert calls[0][1]["text"] is True
+    assert calls[0][1]["errors"] == "replace"
     assert process.terminated is True
     assert process.waited is True
 
@@ -276,11 +289,61 @@ def test_managed_containers_without_containers_skips_inspect(monkeypatch):
     assert calls["stats"] == []
 
 
-def test_managed_containers_reports_missing_inspection(monkeypatch):
+def test_managed_containers_skips_missing_inspection(monkeypatch):
     patch_listing(monkeypatch, inspections=[])
 
-    with pytest.raises(ContainerError, match="did not return"):
-        managed_containers("demo-glm")
+    assert managed_containers("demo-glm") == []
+
+
+def test_managed_containers_handles_multiple_containers(monkeypatch):
+    rows = [ps_row("aaa111"), ps_row("bbb222")]
+    inspections = [inspect_record("aaa111"), inspect_record("bbb222")]
+    samples = [
+        stats_sample("aaa111", usage="1GiB / 8GiB", percent="12.5%"),
+        stats_sample("bbb222", usage="2GiB / 8GiB", percent="25%"),
+    ]
+    patch_listing(monkeypatch, rows=rows, inspections=inspections, samples=samples)
+
+    infos = managed_containers("demo-glm")
+
+    assert [info.id for info in infos] == ["aaa111", "bbb222"]
+    assert [info.memory_usage for info in infos] == [1024**3, 2 * 1024**3]
+    assert [info.memory_percent for info in infos] == [12.5, 25.0]
+
+
+def test_managed_containers_skips_container_removed_mid_redeploy(monkeypatch):
+    rows = [ps_row("aaa111"), ps_row("bbb222")]
+    inspections = [inspect_record("aaa111")]
+    patch_listing(monkeypatch, rows=rows, inspections=inspections, samples=[])
+
+    infos = managed_containers("demo-glm")
+
+    assert [info.id for info in infos] == ["aaa111"]
+
+
+def test_managed_containers_retries_inspection_per_container(monkeypatch):
+    rows = [ps_row("aaa111"), ps_row("bbb222")]
+    calls = []
+
+    def fake_inspect(ids, **kwargs):
+        calls.append(list(ids))
+        if len(ids) > 1:
+            raise docker_ops.DockerError("no such container: bbb222")
+        return [inspect_record(ids[0])]
+
+    monkeypatch.setattr(
+        "spark_fleet.agent.containers.docker_ops.list_containers_by_labels",
+        lambda filters, **kwargs: rows,
+    )
+    monkeypatch.setattr("spark_fleet.agent.containers.docker_ops.inspect_containers", fake_inspect)
+    monkeypatch.setattr(
+        "spark_fleet.agent.containers.docker_ops.container_stats", lambda *a, **k: []
+    )
+
+    infos = managed_containers("demo-glm")
+
+    assert calls == [["aaa111", "bbb222"], ["aaa111"], ["bbb222"]]
+    assert [info.id for info in infos] == ["aaa111", "bbb222"]
 
 
 def test_managed_containers_wraps_docker_errors(monkeypatch):
@@ -305,7 +368,7 @@ def test_managed_containers_wraps_inspect_errors(monkeypatch):
         managed_containers("demo-glm")
 
 
-def test_managed_containers_wraps_stats_errors(monkeypatch):
+def test_managed_containers_degrades_when_stats_fail(monkeypatch):
     patch_listing(monkeypatch)
 
     def fail(*args, **kwargs):
@@ -313,8 +376,11 @@ def test_managed_containers_wraps_stats_errors(monkeypatch):
 
     monkeypatch.setattr("spark_fleet.agent.containers.docker_ops.container_stats", fail)
 
-    with pytest.raises(ContainerError, match="stats failed"):
-        managed_containers("demo-glm")
+    infos = managed_containers("demo-glm")
+
+    assert len(infos) == 1
+    assert infos[0].memory_usage is None
+    assert infos[0].state == "running"
 
 
 def test_managed_containers_reports_missing_health(monkeypatch):
@@ -434,7 +500,7 @@ def test_container_logs_returns_output(monkeypatch):
 
 def test_follow_container_logs_validates_id():
     with pytest.raises(ContainerError, match="invalid container id"):
-        list(follow_container_logs("abc; rm -rf /"))
+        follow_container_logs("abc; rm -rf /")
 
 
 def test_follow_container_logs_rejects_unmanaged_container(monkeypatch):
@@ -444,7 +510,7 @@ def test_follow_container_logs_rejects_unmanaged_container(monkeypatch):
     )
 
     with pytest.raises(ContainerError, match="not managed"):
-        list(follow_container_logs("abc"))
+        follow_container_logs("abc")
 
 
 def test_follow_container_logs_yields_lines(monkeypatch):

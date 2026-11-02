@@ -133,6 +133,7 @@ def container_logs(container_id: str, *, tail: int = 200, timeout: float = 60.0)
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
             text=True,
+            errors="replace",
             check=False,
             timeout=timeout,
         )
@@ -159,6 +160,7 @@ def follow_container_logs(container_id: str, *, tail: int = 200) -> Iterator[str
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
             text=True,
+            errors="replace",
         )
     except OSError as exc:
         raise DockerError(f"could not run docker logs for {container_id}: {exc}") from exc
@@ -173,6 +175,7 @@ def follow_container_logs(container_id: str, *, tail: int = 200) -> Iterator[str
                 process.wait(timeout=5)
             except subprocess.TimeoutExpired:
                 process.kill()
+                process.wait()
         if hasattr(process.stdout, "close"):
             process.stdout.close()
 

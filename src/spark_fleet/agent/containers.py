@@ -75,10 +75,16 @@ def managed_containers(
         ids = [row["ID"] for row in rows if isinstance(row.get("ID"), str) and row["ID"]]
         if not ids:
             raise ContainerError("docker ps returned containers without IDs")
-        inspections = docker_ops.inspect_containers(ids)
-        samples = docker_ops.container_stats(ids)
+        inspections = _inspect_containers(ids)
     except docker_ops.DockerError as exc:
         raise ContainerError(str(exc)) from exc
+
+    # Memory sampling is best-effort: a container may vanish mid-redeploy and a
+    # failed stats call must not hide the state/labels of the others.
+    try:
+        samples = docker_ops.container_stats(ids)
+    except docker_ops.DockerError:
+        samples = []
 
     inspected = {
         record["Id"]: record for record in inspections if isinstance(record.get("Id"), str)
@@ -92,9 +98,27 @@ def managed_containers(
             raise ContainerError(f"docker ps returned a container without an ID: {row!r}")
         record = _match(inspected, container_id)
         if record is None:
-            raise ContainerError(f"docker inspect did not return container {container_id}")
+            # The container disappeared between `docker ps` and `docker inspect`.
+            continue
         infos.append(_container_info(container_id, row, record, _match(sampled, container_id)))
     return infos
+
+
+def _inspect_containers(ids: list[str]) -> list[dict[str, Any]]:
+    try:
+        return docker_ops.inspect_containers(ids)
+    except docker_ops.DockerError as exc:
+        if len(ids) == 1:
+            raise
+        records: list[dict[str, Any]] = []
+        for container_id in ids:
+            try:
+                records.extend(docker_ops.inspect_containers([container_id]))
+            except docker_ops.DockerError:
+                continue
+        if not records:
+            raise exc
+        return records
 
 
 def container_logs(container_id: str, *, tail: int = 200) -> str:
@@ -110,11 +134,19 @@ def container_logs(container_id: str, *, tail: int = 200) -> str:
 
 
 def follow_container_logs(container_id: str, *, tail: int = 200) -> Iterator[str]:
-    """Yield a managed container's log lines until the stream closes."""
+    """Yield a managed container's log lines until the stream closes.
+
+    Validation and the managed-label check run eagerly, before the caller starts
+    streaming, so an unknown or non-fleet container is rejected up front.
+    """
 
     _validate_container_id(container_id)
     _validate_tail(tail)
     _require_managed(container_id)
+    return _follow(container_id, tail)
+
+
+def _follow(container_id: str, tail: int) -> Iterator[str]:
     try:
         yield from docker_ops.follow_container_logs(container_id, tail=tail)
     except docker_ops.DockerError as exc:
