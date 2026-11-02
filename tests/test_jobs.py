@@ -1,6 +1,7 @@
 """Tests for the job runner, lifecycle locks, cancellation, and recovery."""
 
 import asyncio
+import time
 
 import pytest
 
@@ -381,6 +382,37 @@ async def test_start_recovers_interrupted_jobs(db, bus):
         if event.type == "job" and event.data["status"] == "failed"
     }
     assert recovered == {"pending", "running"}
+
+    collector.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await collector
+
+
+async def test_recovery_reaches_jobs_beyond_list_limit(db, bus):
+    now = time.time()
+    with db._conn:
+        db._conn.executemany(
+            "INSERT INTO jobs (id, kind, status, created_at) VALUES (?, ?, ?, ?)",
+            [(f"bulk-{index}", "load", "succeeded", now + index) for index in range(10_001)],
+        )
+    db.create_job("old-pending", "load", now=now - 1)
+
+    events = []
+
+    async def collect():
+        async for event in bus.subscribe():
+            events.append(event)
+
+    collector = asyncio.create_task(collect())
+    await asyncio.sleep(0)
+
+    runner = JobRunner(db, bus, pool_size=1)
+    await runner.start()
+    await asyncio.sleep(0)
+    await runner.stop()
+
+    assert db.get_job("old-pending")["status"] == "failed"
+    assert any(event.type == "job" and event.data["id"] == "old-pending" for event in events)
 
     collector.cancel()
     with pytest.raises(asyncio.CancelledError):
