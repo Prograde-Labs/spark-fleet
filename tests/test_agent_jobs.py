@@ -152,6 +152,21 @@ def test_start_job_requires_fleet_labels(monkeypatch):
         )
 
 
+@pytest.mark.parametrize(
+    "extra",
+    [
+        {"BAD KEY": "x"},
+        {"owner": "bad\nvalue"},
+        {"owner": ""},
+    ],
+)
+def test_start_job_rejects_invalid_labels(monkeypatch, extra):
+    patch_popen(monkeypatch, FakeProcess())
+
+    with pytest.raises(JobError, match="label"):
+        start_job("stage", "alpine:latest", ["true"], labels={**LABELS, **extra})
+
+
 @pytest.mark.parametrize("name", ["Bad Name", "", "UPPER", "../escape"])
 def test_start_job_rejects_invalid_name(monkeypatch, name):
     patch_popen(monkeypatch, FakeProcess())
@@ -200,6 +215,20 @@ def test_start_job_rejects_environment_newline(monkeypatch):
 
     with pytest.raises(JobError, match="environment"):
         start_job("stage", "alpine:latest", ["true"], labels=LABELS, environment={"A": "x\ny"})
+
+
+def test_start_job_rejects_volumes_as_string(monkeypatch):
+    patch_popen(monkeypatch, FakeProcess())
+
+    with pytest.raises(JobError, match="volumes"):
+        start_job("stage", "alpine:latest", ["true"], labels=LABELS, volumes="/host:/stage")
+
+
+def test_start_job_rejects_environment_as_string(monkeypatch):
+    patch_popen(monkeypatch, FakeProcess())
+
+    with pytest.raises(JobError, match="environment"):
+        start_job("stage", "alpine:latest", ["true"], labels=LABELS, environment="A=1")
 
 
 # wait / cancel ------------------------------------------------------------
@@ -275,6 +304,26 @@ def test_wait_timeout_cancels_job(monkeypatch):
     assert removed == ["spark-fleet-job-stage"]
 
 
+class StubbornProcess(FakeProcess):
+    def wait(self, timeout=None):
+        self.wait_calls += 1
+        raise subprocess.TimeoutExpired("docker", timeout)
+
+
+def test_cancel_kills_unresponsive_process(monkeypatch):
+    process = StubbornProcess()
+    patch_popen(monkeypatch, process)
+    removed = patch_remove(monkeypatch)
+
+    job = start_job("stage", "alpine:latest", ["true"], labels=LABELS)
+    job.cancel()
+
+    assert process.terminated is True
+    assert process.killed is True
+    assert process.wait_calls == 2
+    assert removed == ["spark-fleet-job-stage"]
+
+
 # manager ------------------------------------------------------------------
 
 
@@ -319,14 +368,43 @@ def test_pull_image_builds_command(monkeypatch):
         docker_ops.subprocess,
         "run",
         lambda args, **kwargs: (
-            calls.append(args) or completed(args, stdout="Status: Downloaded newer image\n")
+            calls.append((args, kwargs))
+            or completed(args, stdout="Status: Downloaded newer image\n")
         ),
     )
 
     output = pull_image("ghcr.io/org/img:tag")
 
     assert output == "Status: Downloaded newer image\n"
-    assert calls[0] == ["docker", "pull", "ghcr.io/org/img:tag"]
+    assert calls[0][0] == ["docker", "pull", "ghcr.io/org/img:tag"]
+    assert calls[0][1]["stdout"] is subprocess.PIPE
+    assert calls[0][1]["stderr"] is subprocess.STDOUT
+    assert calls[0][1]["text"] is True
+    assert calls[0][1]["errors"] == "replace"
+
+
+def test_pull_image_failure_raises_with_output(monkeypatch):
+    monkeypatch.setattr(
+        docker_ops.subprocess,
+        "run",
+        lambda args, **kwargs: completed(args, returncode=1, stdout="pull access denied\n"),
+    )
+
+    with pytest.raises(docker_ops.DockerError, match="pull access denied"):
+        docker_ops.pull_image("ghcr.io/org/img:tag")
+
+
+def test_remove_container_builds_command(monkeypatch):
+    calls = []
+    monkeypatch.setattr(
+        docker_ops.subprocess,
+        "run",
+        lambda args, **kwargs: calls.append(args) or completed(args),
+    )
+
+    docker_ops.remove_container("spark-fleet-job-stage")
+
+    assert calls[0] == ["docker", "rm", "-f", "spark-fleet-job-stage"]
 
 
 def test_pull_image_rejects_invalid_reference(monkeypatch):

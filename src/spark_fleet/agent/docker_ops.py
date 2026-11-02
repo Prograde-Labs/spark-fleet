@@ -181,10 +181,25 @@ def follow_container_logs(container_id: str, *, tail: int = 200) -> Iterator[str
 
 
 def pull_image(image: str, *, timeout: float = 1800.0) -> str:
-    """Pull ``image`` and return the CLI output."""
+    """Pull ``image`` and return the CLI's combined progress output."""
 
-    result = _run([DOCKER, "pull", image], timeout)
-    _require_success(result, f"docker pull {image}")
+    try:
+        result = subprocess.run(
+            [DOCKER, "pull", image],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            errors="replace",
+            check=False,
+            timeout=timeout,
+        )
+    except subprocess.TimeoutExpired as exc:
+        raise DockerError(f"docker pull {image} timed out after {timeout} seconds") from exc
+    except OSError as exc:
+        raise DockerError(f"could not run docker pull {image}: {exc}") from exc
+    if result.returncode:
+        detail = (result.stdout or "").strip()
+        raise DockerError(f"docker pull {image} failed: {detail or f'exit {result.returncode}'}")
     return result.stdout
 
 

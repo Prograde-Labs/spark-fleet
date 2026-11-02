@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import re
 import subprocess
+import threading
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 
@@ -47,6 +48,20 @@ class OneShotJob:
         self._container_name = container_name
         self._process = process
         self._cancelled = False
+        self._chunks: list[str] = []
+        self._reader = threading.Thread(target=self._drain, daemon=True)
+        self._reader.start()
+
+    def _drain(self) -> None:
+        stdout = self._process.stdout
+        if stdout is None:
+            return
+        try:
+            for chunk in stdout:
+                self._chunks.append(chunk)
+        except (OSError, ValueError):
+            # The pipe closed while cancelling; keep whatever was captured.
+            pass
 
     @property
     def name(self) -> str:
@@ -91,12 +106,11 @@ class OneShotJob:
             except subprocess.TimeoutExpired:
                 exit_code = None
 
-        stdout = self._process.stdout
-        logs = stdout.read() if stdout is not None and hasattr(stdout, "read") else ""
+        self._reader.join(timeout=_CANCEL_GRACE_SECONDS)
         return JobResult(
             name=self._name,
             exit_code=exit_code,
-            logs=logs,
+            logs="".join(self._chunks),
             cancelled=self._cancelled,
             timed_out=timed_out,
         )
@@ -117,9 +131,13 @@ def start_job(
     _validate_image(image)
     _validate_command(command)
     _validate_labels(labels)
+    if isinstance(volumes, str) or not isinstance(volumes, Sequence):
+        raise JobError("volumes must be a sequence of mount strings")
     volume_list = list(volumes)
     for volume in volume_list:
         _validate_volume(volume)
+    if environment is not None and not isinstance(environment, Mapping):
+        raise JobError("environment must be a mapping")
     env = dict(environment or {})
     for key, value in env.items():
         _validate_environment(key, value)
