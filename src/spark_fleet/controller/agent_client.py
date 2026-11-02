@@ -102,6 +102,17 @@ class AgentClient:
 
     # Containers and logs --------------------------------------------------
 
+    async def list_containers(
+        self, *, deployment: str | None = None, role: str | None = None
+    ) -> list[dict[str, Any]]:
+        params: dict[str, str] = {}
+        if deployment is not None:
+            params["deployment"] = deployment
+        if role is not None:
+            params["role"] = role
+        payload = await self._request("GET", "/containers", params=params or None)
+        return _require_list(payload, "containers", "container list")
+
     async def container_logs(self, container_id: str, *, tail: int = 200) -> str:
         payload = await self._request(
             "GET",

@@ -169,6 +169,71 @@ def build_app(
             raise HTTPException(status_code=404, detail=str(exc)) from exc
         return _node_status_dict(status)
 
+    @app.get("/api/nodes/{node_id}/containers", dependencies=[Depends(session_dep)])
+    async def node_containers(
+        node_id: str,
+        deployment: str | None = None,
+        role: str | None = None,
+    ) -> dict[str, Any]:
+        try:
+            node = registry.require(node_id)
+        except NodeError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        client = client_factory(node.agent_url, agent_token)
+        try:
+            containers = await client.list_containers(deployment=deployment, role=role)
+        except AgentError as exc:
+            raise HTTPException(status_code=502, detail=str(exc)) from exc
+        finally:
+            await client.aclose()
+        return {"node_id": node.id, "containers": containers}
+
+    @app.get(
+        "/api/nodes/{node_id}/containers/{container_id}/logs",
+        dependencies=[Depends(session_dep)],
+    )
+    async def node_container_logs(
+        node_id: str,
+        container_id: str,
+        tail: int = Query(200, ge=1, le=5000),
+    ) -> dict[str, Any]:
+        try:
+            node = registry.require(node_id)
+        except NodeError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        client = client_factory(node.agent_url, agent_token)
+        try:
+            text = await client.container_logs(container_id, tail=tail)
+        except AgentError as exc:
+            raise HTTPException(status_code=502, detail=str(exc)) from exc
+        finally:
+            await client.aclose()
+        return {"node_id": node.id, "container_id": container_id, "logs": text}
+
+    @app.get(
+        "/api/nodes/{node_id}/containers/{container_id}/logs/stream",
+        dependencies=[Depends(session_dep)],
+    )
+    async def node_container_log_stream(
+        node_id: str,
+        container_id: str,
+        tail: int = Query(200, ge=1, le=5000),
+    ) -> StreamingResponse:
+        try:
+            node = registry.require(node_id)
+        except NodeError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        client = client_factory(node.agent_url, agent_token)
+
+        async def stream():
+            try:
+                async for line in client.follow_container_logs(container_id, tail=tail):
+                    yield line
+            finally:
+                await client.aclose()
+
+        return StreamingResponse(stream(), media_type="text/plain")
+
     # Recipes --------------------------------------------------------------
 
     @app.get("/api/recipes", dependencies=[Depends(session_dep)])

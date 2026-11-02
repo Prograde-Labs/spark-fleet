@@ -133,6 +133,20 @@ export const api = {
       request(`/api/nodes/${encodeURIComponent(id)}`, { method: 'DELETE' }),
     check: (id) =>
       request(`/api/nodes/${encodeURIComponent(id)}/check`, { method: 'POST' }),
+    containers: (id, params = {}) =>
+      request(
+        `/api/nodes/${encodeURIComponent(id)}/containers${query(params)}`,
+      ),
+    containerLogs: (id, containerId, tail = 200) =>
+      request(
+        `/api/nodes/${encodeURIComponent(id)}/containers/${encodeURIComponent(
+          containerId,
+        )}/logs${query({ tail })}`,
+      ),
+    containerLogStreamUrl: (id, containerId, tail = 200) =>
+      `/api/nodes/${encodeURIComponent(id)}/containers/${encodeURIComponent(
+        containerId,
+      )}/logs/stream${query({ tail })}`,
   },
 
   recipes: {

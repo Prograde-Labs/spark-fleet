@@ -122,6 +122,23 @@ class FakeAgentClient:
         }
         return "dl-job"
 
+    async def list_containers(self, *, deployment=None, role=None):
+        self.calls.append("containers")
+        if STATE.get("containers_error"):
+            raise AgentError("containers unavailable")
+        STATE["containers_filter"] = (deployment, role)
+        return STATE.get(
+            "containers",
+            [
+                {
+                    "id": "c1",
+                    "name": "spark-fleet-glm-head",
+                    "state": "running",
+                    "labels": {"spark.fleet.deployment": "glm"},
+                }
+            ],
+        )
+
     async def container_logs(self, container_id, *, tail=200):
         self.calls.append("container_logs")
         if STATE.get("logs_error"):
@@ -1207,3 +1224,32 @@ def test_model_job_get_and_cancel(env):
     assert fetched.status_code == 200
     assert fetched.json()["job"]["id"] == "job-1"
     assert cancelled.json() == {"cancelled": True}
+
+
+def test_node_containers_list_and_filter(env):
+    add_node(env.client)
+
+    body = env.client.get(
+        "/api/nodes/spark-01/containers",
+        params={"deployment": "glm", "role": "head"},
+    ).json()
+
+    assert body["containers"][0]["id"] == "c1"
+    assert STATE["containers_filter"] == ("glm", "head")
+
+    missing = env.client.get("/api/nodes/nope/containers")
+    assert missing.status_code == 404
+
+    STATE["containers_error"] = True
+    assert env.client.get("/api/nodes/spark-01/containers").status_code == 502
+
+
+def test_node_container_logs_and_stream(env):
+    add_node(env.client)
+
+    logs = env.client.get("/api/nodes/spark-01/containers/c1/logs?tail=20")
+    stream = env.client.get("/api/nodes/spark-01/containers/c1/logs/stream")
+
+    assert logs.json()["logs"] == "line one\nline two"
+    assert STATE["logs"] == {"container_id": "c1", "tail": 20}
+    assert stream.text == "stream one\nstream two\n"
