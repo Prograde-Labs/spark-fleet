@@ -968,6 +968,77 @@ async def test_redeploy_changed_roles_stops_old_roles(db, registry, runner):
     assert db.get_deployment("dep-1")["status"] == "loaded"
 
 
+async def test_redeploy_early_failure_preserves_old_recipe(db, registry, runner):
+    old_recipe = create_deployment(db, status="loaded")
+    add_roles(db, "dep-1", old_recipe)
+    changed = parse_recipe(
+        recipe_dict(
+            roles=[
+                {
+                    "name": "solo",
+                    "node": "spark-01",
+                    "class": "heavy",
+                    "startOrder": 10,
+                    "inferencePort": 8888,
+                    "service": {"image": "new:tag"},
+                }
+            ]
+        )
+    )
+    agents = agents_for()
+    agents[NODE_01_URL].models_response = {"roots": [], "models": []}
+    manager = make_manager(db, registry, runner, agents)
+
+    job = await wait_job(db, await manager.redeploy("dep-1", recipe=changed), "failed")
+
+    assert "not cached" in job["error"]
+    stored = db.get_deployment("dep-1")["recipe"]
+    assert [role["name"] for role in stored["spec"]["roles"]] == ["worker", "head"]
+    assert db.get_deployment("dep-1")["status"] == "loaded"
+
+    await wait_job(db, await manager.unload("dep-1"), "succeeded")
+    assert ("down", "spark-fleet-demo-glm-head") in agents[NODE_01_URL].calls
+    assert ("down", "spark-fleet-demo-glm-worker") in agents[NODE_02_URL].calls
+
+
+async def test_cancelled_redeploy_stops_new_roles(db, registry, runner):
+    old_recipe = create_deployment(db, status="loaded")
+    add_roles(db, "dep-1", old_recipe)
+    changed = parse_recipe(
+        recipe_dict(
+            roles=[
+                {
+                    "name": "solo",
+                    "node": "spark-01",
+                    "class": "heavy",
+                    "startOrder": 10,
+                    "inferencePort": 8888,
+                    "service": {"image": "new:tag"},
+                }
+            ]
+        )
+    )
+    readiness_started = asyncio.Event()
+
+    async def blocking_readiness(role, node, project, client, container_id):
+        readiness_started.set()
+        await asyncio.Event().wait()
+
+    agents = agents_for()
+    manager = make_manager(db, registry, runner, agents, readiness=blocking_readiness)
+
+    job_id = await manager.redeploy("dep-1", recipe=changed)
+    await asyncio.wait_for(readiness_started.wait(), timeout=2)
+    assert await runner.cancel(job_id) is True
+    await wait_job(db, job_id, "cancelled")
+
+    assert ("up", "spark-fleet-demo-glm-solo") in agents[NODE_01_URL].calls
+    assert ("down", "spark-fleet-demo-glm-solo") in agents[NODE_01_URL].calls
+    deployment = db.get_deployment("dep-1")
+    assert deployment["status"] == "failed"
+    assert deployment["error"] == "cancelled"
+
+
 async def test_failed_redeploy_clears_primary(db, registry, runner):
     recipe_obj = create_deployment(db, status="loaded")
     add_roles(db, "dep-1", recipe_obj)

@@ -107,24 +107,18 @@ class DeploymentManager:
     ) -> str:
         deployment = self._require_deployment(deployment_id)
         previous_recipe = self._recipe(deployment)
-        if recipe is not None:
-            self._validate_load(deployment, recipe, allow_loaded=True)
-            self._db.update_deployment_recipe(
-                deployment_id,
-                recipe.model_dump(by_alias=True, exclude_unset=True),
-                recipe_name=recipe.metadata.name,
-                mode=recipe.spec.mode,
-            )
-            deployment = self._require_deployment(deployment_id)
         current = recipe if recipe is not None else previous_recipe
         self._validate_load(deployment, current, allow_loaded=True)
+        payload = {
+            "deployment_id": deployment_id,
+            "primary": primary,
+            "previous_recipe": previous_recipe.model_dump(by_alias=True, exclude_unset=True),
+        }
+        if recipe is not None:
+            payload["recipe"] = recipe.model_dump(by_alias=True, exclude_unset=True)
         return await self._runner.submit(
             "deployment.redeploy",
-            {
-                "deployment_id": deployment_id,
-                "primary": primary,
-                "previous_recipe": previous_recipe.model_dump(by_alias=True, exclude_unset=True),
-            },
+            payload,
             deployment_id=deployment_id,
             locks=self._locks(deployment_id, current),
         )
@@ -158,6 +152,12 @@ class DeploymentManager:
             raise DeploymentError("deployment id is required")
         deployment = self._require_deployment(deployment_id)
         recipe = self._recipe(deployment)
+        payload_recipe = payload.get("recipe")
+        if isinstance(payload_recipe, Mapping):
+            try:
+                recipe = parse_recipe(payload_recipe)
+            except RecipeError as exc:
+                raise DeploymentError(f"deployment recipe is invalid: {exc}") from exc
         self._validate_load(
             deployment,
             recipe,
@@ -200,6 +200,13 @@ class DeploymentManager:
             self._event(job, "starting roles", phase="start")
             await self._start_roles(recipe, deployment, clients, job, started)
 
+            if isinstance(payload_recipe, Mapping):
+                self._db.update_deployment_recipe(
+                    deployment_id,
+                    recipe.model_dump(by_alias=True, exclude_unset=True),
+                    recipe_name=recipe.metadata.name,
+                    mode=recipe.spec.mode,
+                )
             self._db.update_deployment(
                 deployment_id, status="loaded", error=None, loaded_at=time.time()
             )
@@ -215,8 +222,11 @@ class DeploymentManager:
                 uncancel()
             self._event(job, "deployment cancelled", level="error", phase="cancelled")
             if stop_attempted:
+                await self._stop_started(deployment_id, started)
                 await self._stop_roles(deployment, stop_recipe, clients)
                 for role in stop_recipe.spec.roles:
+                    self._mark_role_stopped(deployment_id, role)
+                for role in recipe.spec.roles:
                     self._mark_role_stopped(deployment_id, role)
                 self._db.update_deployment(deployment_id, status="failed", error="cancelled")
                 if deployment["is_primary"]:
@@ -237,24 +247,28 @@ class DeploymentManager:
             error = str(exc)
             self._event(job, f"deployment failed: {error}", level="error", phase="failed")
             if stop_attempted:
-                await self._stop_started(deployment_id, started)
-                for role in stop_recipe.spec.roles:
-                    self._mark_role_stopped(deployment_id, role)
-                for role in recipe.spec.roles:
-                    self._mark_role_stopped(deployment_id, role)
-                self._db.update_deployment(deployment_id, status="failed", error=error)
-                if deployment["is_primary"]:
-                    self._db.clear_primary()
+                try:
+                    await self._stop_started(deployment_id, started)
+                finally:
+                    for role in stop_recipe.spec.roles:
+                        self._mark_role_stopped(deployment_id, role)
+                    for role in recipe.spec.roles:
+                        self._mark_role_stopped(deployment_id, role)
+                    self._db.update_deployment(deployment_id, status="failed", error=error)
+                    if deployment["is_primary"]:
+                        self._db.clear_primary()
                 rollback_errors = await self._rollback(displaced, clients, job)
                 if rollback_errors:
                     error = f"{error}; rollback: {'; '.join(rollback_errors)}"
             elif started:
-                await self._stop_started(deployment_id, started)
-                for role in recipe.spec.roles:
-                    self._mark_role_stopped(deployment_id, role)
-                self._db.update_deployment(deployment_id, status="failed", error=error)
-                if deployment["is_primary"]:
-                    self._db.clear_primary()
+                try:
+                    await self._stop_started(deployment_id, started)
+                finally:
+                    for role in recipe.spec.roles:
+                        self._mark_role_stopped(deployment_id, role)
+                    self._db.update_deployment(deployment_id, status="failed", error=error)
+                    if deployment["is_primary"]:
+                        self._db.clear_primary()
                 rollback_errors = await self._rollback(displaced, clients, job)
                 if rollback_errors:
                     error = f"{error}; rollback: {'; '.join(rollback_errors)}"
