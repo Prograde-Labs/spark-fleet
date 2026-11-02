@@ -637,13 +637,18 @@ def test_published_port_shapes_are_claimed(port_entry):
         "9000:abc",
         "9000:",
         "[::1]9000:9000",
+        "[::1]:8080",
         "[::1]:9000:9000:9001",
         "[::1]:abc:9000:9000",
+        "not-an-ip:9000:9000",
+        "9000:9000:9000",
+        "9000:8000-9500",
         "9000:9000/",
         70000,
         0,
         -1,
         {"target": 70000, "published": None},
+        {"target": "8000-9500"},
         {"published": 9000},
     ],
 )
@@ -651,7 +656,23 @@ def test_invalid_published_ports_rejected(port_entry):
     data = copy.deepcopy(SERVICE)
     data["spec"]["roles"][0]["service"]["ports"] = [port_entry]
 
-    with pytest.raises(RecipeError, match="port"):
+    with pytest.raises(RecipeError, match="port|bind address"):
+        parse_recipe(data)
+
+
+def test_boolean_port_rejected():
+    data = copy.deepcopy(SERVICE)
+    data["spec"]["roles"][0]["service"]["ports"] = [True]
+
+    with pytest.raises(RecipeError, match="ports"):
+        parse_recipe(data)
+
+
+def test_long_form_port_requires_target():
+    data = copy.deepcopy(SERVICE)
+    data["spec"]["roles"][0]["service"]["ports"] = [{"published": 9000}]
+
+    with pytest.raises(RecipeError, match="requires target"):
         parse_recipe(data)
 
 
@@ -941,8 +962,8 @@ def test_long_form_udp_port_allowed():
 
 def test_wide_container_port_range_allowed():
     data = copy.deepcopy(SERVICE)
-    data["spec"]["roles"][0]["service"]["ports"] = ["8000-9500", "9000:8000-9500"]
+    data["spec"]["roles"][0]["service"]["ports"] = ["8000-9500"]
 
     recipe = parse_recipe(data)
 
-    assert recipe.spec.roles[0].service.ports == ["8000-9500", "9000:8000-9500"]
+    assert recipe.spec.roles[0].service.ports == ["8000-9500"]

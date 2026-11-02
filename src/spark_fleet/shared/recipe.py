@@ -13,13 +13,22 @@ registry check once nodes are known.
 
 from __future__ import annotations
 
+import ipaddress
 import re
 from collections.abc import Iterable, Mapping
 from pathlib import Path
 from typing import Any, Final, Literal
 
 import yaml
-from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator, model_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    StrictInt,
+    ValidationError,
+    field_validator,
+    model_validator,
+)
 
 API_VERSION: Final = "spark-fleet/v1"
 KIND: Final = "Recipe"
@@ -127,7 +136,7 @@ class ServiceSpec(BaseModel):
         default_factory=dict
     )
     volumes: list[str | dict[str, Any]] = Field(default_factory=list)
-    ports: list[str | int | dict[str, Any]] = Field(default_factory=list)
+    ports: list[str | StrictInt | dict[str, Any]] = Field(default_factory=list)
     network_mode: str | None = None
     gpus: str | list[Any] | None = None
     ipc: str | None = None
@@ -269,22 +278,34 @@ def _expand_port_spec(spec: str, label: str) -> list[int]:
     return [_check_port(int(spec), label)]
 
 
-def _validate_container_spec(spec: str) -> None:
-    """Validate a container-side port or range without expanding it."""
-
+def _parse_port_range(spec: str, label: str) -> tuple[int, int]:
     if "-" in spec:
         start, _, end = spec.partition("-")
         if not (start.isascii() and start.isdigit() and end.isascii() and end.isdigit()):
-            raise ValueError(f"invalid container port range: {spec!r}")
+            raise ValueError(f"invalid {label} port range: {spec!r}")
         low, high = int(start), int(end)
         if low > high:
-            raise ValueError(f"invalid container port range: {spec!r}")
-        _check_port(low, "container")
-        _check_port(high, "container")
-        return
+            raise ValueError(f"invalid {label} port range: {spec!r}")
+        _check_port(low, label)
+        _check_port(high, label)
+        return low, high
     if not (spec.isascii() and spec.isdigit()):
-        raise ValueError(f"invalid container port: {spec!r}")
-    _check_port(int(spec), "container")
+        raise ValueError(f"invalid {label} port: {spec!r}")
+    port = _check_port(int(spec), label)
+    return port, port
+
+
+def _validate_container_spec(spec: str) -> None:
+    """Validate a container-side port or range without expanding it."""
+
+    _parse_port_range(spec, "container")
+
+
+def _validate_bind_ip(value: str) -> None:
+    try:
+        ipaddress.ip_address(value)
+    except ValueError as exc:
+        raise ValueError(f"invalid bind address: {value!r}") from exc
 
 
 def _published_ports(service: ServiceSpec) -> list[tuple[int, str]]:
@@ -292,6 +313,11 @@ def _published_ports(service: ServiceSpec) -> list[tuple[int, str]]:
 
     Container-only entries (bare integers and ``"8080"``) are skipped because
     Compose assigns them an ephemeral host port; they cannot collide.
+
+    Bind addresses are validated but deliberately excluded from the conflict
+    key: the same host port on a node is treated as a conflict even when bound
+    to different interfaces. That conservative rule is safer for a fleet where
+    a node is expected to expose a single published endpoint.
     """
 
     ports: list[tuple[int, str]] = []
@@ -314,7 +340,9 @@ def _published_ports(service: ServiceSpec) -> list[tuple[int, str]]:
             if isinstance(target, int):
                 _check_port(target, "container")
             elif isinstance(target, str):
-                _validate_container_spec(target)
+                if not (target.isascii() and target.isdigit()):
+                    raise ValueError(f"invalid container port: {target!r}")
+                _check_port(int(target), "container")
             else:
                 raise ValueError(f"invalid container port: {target!r}")
 
@@ -354,25 +382,34 @@ def _published_ports(service: ServiceSpec) -> list[tuple[int, str]]:
             closing = port_spec.find("]:")
             if closing == -1:
                 raise ValueError(f"invalid published port: {entry!r}")
+            _validate_bind_ip(port_spec[1:closing])
             port_spec = port_spec[closing + 2 :]
         parts = port_spec.split(":")
         max_parts = 2 if bracketed else 3
         if len(parts) > max_parts:
             raise ValueError(f"invalid published port: {entry!r}")
         if len(parts) == 1:
+            if bracketed:
+                raise ValueError(f"invalid published port: {entry!r}")
             _validate_container_spec(parts[0])
             continue
         if len(parts) == 2:
             host, container = parts
         else:
-            _, host, container = parts
+            bind_ip, host, container = parts
+            _validate_bind_ip(bind_ip)
         if not container:
             raise ValueError(f"invalid published port: {entry!r}")
-        _validate_container_spec(container)
+        container_low, container_high = _parse_port_range(container, "container")
         if not host:
             # Ephemeral host port (e.g. "127.0.0.1::8080").
             continue
-        for port in _expand_port_spec(host, "published"):
+        host_low, host_high = _parse_port_range(host, "published")
+        if host_high - host_low + 1 > _MAX_PORT_RANGE:
+            raise ValueError(f"published port range too large: {host!r}")
+        if host_high - host_low != container_high - container_low:
+            raise ValueError(f"host and container port ranges must match: {entry!r}")
+        for port in range(host_low, host_high + 1):
             add(port, protocol)
     return ports
 
