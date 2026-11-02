@@ -626,7 +626,19 @@ def test_published_port_shapes_are_claimed(port_entry):
 
 @pytest.mark.parametrize(
     "port_entry",
-    ["9000-8000:9000-8000", "0:0", "70000:70000", "1-5000:1-5000", "9000-abc:9000-abc"],
+    [
+        "9000-8000:9000-8000",
+        "0:0",
+        "70000:70000",
+        "1-5000:1-5000",
+        "9000-abc:9000-abc",
+        "abc",
+        "1:2:3:4",
+        "9000:abc",
+        "9000:",
+        "[::1]9000:9000",
+        "9000:9000/",
+    ],
 )
 def test_invalid_published_ports_rejected(port_entry):
     data = copy.deepcopy(SERVICE)
@@ -859,9 +871,56 @@ def test_long_form_and_short_form_duplicate_rejected():
         parse_recipe(data)
 
 
-def test_invalid_port_protocol_rejected():
+@pytest.mark.parametrize(
+    "port_entry",
+    [
+        "9000:9000/xyz",
+        {"target": 9000, "published": 9000, "protocol": "xyz"},
+    ],
+)
+def test_invalid_port_protocol_rejected(port_entry):
     data = copy.deepcopy(SERVICE)
-    data["spec"]["roles"][0]["service"]["ports"] = ["9000:9000/xyz"]
+    data["spec"]["roles"][0]["service"]["ports"] = [port_entry]
 
     with pytest.raises(RecipeError, match="invalid port protocol"):
         parse_recipe(data)
+
+
+def test_tcp_and_udp_same_port_across_roles_allowed():
+    data = copy.deepcopy(DEPLOYMENT)
+    for role in data["spec"]["roles"]:
+        role["class"] = "light"
+        role["node"] = "spark-01"
+        del role["inferencePort"]
+    data["spec"]["roles"][0]["service"]["ports"] = ["53:53/tcp"]
+    data["spec"]["roles"][1]["service"]["ports"] = ["53:53/udp"]
+
+    recipe = parse_recipe(data)
+
+    assert recipe.spec.roles[0].service.ports == ["53:53/tcp"]
+    assert recipe.spec.roles[1].service.ports == ["53:53/udp"]
+
+
+def test_same_protocol_across_roles_rejected():
+    data = copy.deepcopy(DEPLOYMENT)
+    for role in data["spec"]["roles"]:
+        role["class"] = "light"
+        role["node"] = "spark-01"
+        del role["inferencePort"]
+        role["service"]["ports"] = ["53:53/tcp"]
+
+    with pytest.raises(RecipeError, match="duplicate port 53"):
+        parse_recipe(data)
+
+
+def test_long_form_udp_port_allowed():
+    data = copy.deepcopy(SERVICE)
+    data["spec"]["roles"][0]["service"]["ports"] = [
+        {"target": 53, "published": 53, "protocol": "udp"}
+    ]
+
+    recipe = parse_recipe(data)
+
+    assert recipe.spec.roles[0].service.ports == [
+        {"target": 53, "published": 53, "protocol": "udp"}
+    ]

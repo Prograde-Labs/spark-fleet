@@ -308,22 +308,30 @@ def _published_ports(service: ServiceSpec) -> list[tuple[int, str]]:
         if not isinstance(entry, str):
             continue
 
-        port_spec, _, protocol = entry.partition("/")
+        port_spec, slash, protocol = entry.partition("/")
+        if slash and not protocol:
+            raise ValueError(f"invalid port protocol: {protocol!r}")
         protocol = protocol.lower() or "tcp"
         if protocol not in _PORT_PROTOCOLS:
             raise ValueError(f"invalid port protocol: {protocol!r}")
         if port_spec.startswith("["):
             closing = port_spec.find("]:")
             if closing == -1:
-                continue
+                raise ValueError(f"invalid published port: {entry!r}")
             port_spec = port_spec[closing + 2 :]
         parts = port_spec.split(":")
-        if len(parts) == 2:
-            host = parts[0]
-        elif len(parts) == 3:
-            host = parts[1]
-        else:
+        if len(parts) == 1:
+            _expand_port_spec(parts[0], "container")
             continue
+        if len(parts) > 3:
+            raise ValueError(f"invalid published port: {entry!r}")
+        if len(parts) == 2:
+            host, container = parts
+        else:
+            _, host, container = parts
+        if not container:
+            raise ValueError(f"invalid published port: {entry!r}")
+        _expand_port_spec(container, "container")
         if not host:
             # Ephemeral host port (e.g. "127.0.0.1::8080").
             continue
