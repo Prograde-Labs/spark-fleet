@@ -86,7 +86,7 @@ def test_scan_reports_empty_cache_dir_as_partial(tmp_path):
     assert entry.size_bytes == 0
 
 
-def test_scan_reports_incomplete_blobs_as_partial(tmp_path):
+def test_scan_flags_incomplete_blobs_without_hiding_cached_entry(tmp_path):
     root = tmp_path / "hub"
     path = write_cached(root, "org/name", b"{}")
     (path / "blobs").mkdir()
@@ -94,13 +94,24 @@ def test_scan_reports_incomplete_blobs_as_partial(tmp_path):
 
     entry = ModelCatalog([root]).scan().models[0]
 
-    assert entry.cached is False
+    assert entry.cached is True
     assert entry.partial is True
     assert entry.size_bytes == 12
 
     (path / "blobs" / "weights.incomplete").unlink()
 
     entry = ModelCatalog([root]).scan().models[0]
+    assert entry.cached is True
+    assert entry.partial is False
+
+
+def test_scan_ignores_incomplete_names_outside_blobs(tmp_path):
+    root = tmp_path / "hub"
+    path = write_cached(root, "org/name")
+    (path / "snapshots" / "abc123" / "notes.incomplete").write_text("data")
+
+    entry = ModelCatalog([root]).scan().models[0]
+
     assert entry.cached is True
     assert entry.partial is False
 
@@ -682,44 +693,54 @@ def test_job_manager_refuses_removal_while_downloading(tmp_path, monkeypatch):
     manager.wait(job_id, timeout=2)
 
 
-def test_job_manager_serializes_removal_with_new_downloads(tmp_path, monkeypatch):
+def test_job_manager_rejects_start_during_removal(tmp_path, monkeypatch):
     root = tmp_path / "hub"
     catalog = ModelCatalog([root])
     manager = ModelJobManager(catalog)
     remove_started = threading.Event()
     release_remove = threading.Event()
-    resolved = threading.Event()
-    download_started = threading.Event()
 
     def slow_remove(repo, **kwargs):
         remove_started.set()
         release_remove.wait(2)
 
-    original_resolve = catalog.resolve_root
-
-    def tracking_resolve(*args, **kwargs):
-        resolved.set()
-        return original_resolve(*args, **kwargs)
-
     monkeypatch.setattr(catalog, "remove", slow_remove)
-    monkeypatch.setattr(catalog, "resolve_root", tracking_resolve)
-    monkeypatch.setattr(
-        models,
-        "snapshot_download",
-        lambda *args, **kwargs: download_started.set() or str(root),
-    )
 
     remover = threading.Thread(target=manager.remove, args=("org/name",), kwargs={"confirm": True})
     remover.start()
     assert remove_started.wait(1)
 
-    starter = threading.Thread(target=manager.start, args=("org/name",))
-    starter.start()
-    assert resolved.wait(1)
-    assert download_started.is_set() is False
+    with pytest.raises(ModelError, match="removal in progress"):
+        manager.start("org/name")
 
     release_remove.set()
     remover.join(1)
-    starter.join(1)
 
-    assert download_started.wait(1)
+
+def test_job_manager_status_stays_responsive_during_removal(tmp_path, monkeypatch):
+    root = tmp_path / "hub"
+    catalog = ModelCatalog([root])
+    manager = ModelJobManager(catalog)
+    remove_started = threading.Event()
+    release_remove = threading.Event()
+
+    def slow_remove(repo, **kwargs):
+        remove_started.set()
+        release_remove.wait(2)
+
+    monkeypatch.setattr(catalog, "remove", slow_remove)
+
+    remover = threading.Thread(target=manager.remove, args=("org/name",), kwargs={"confirm": True})
+    remover.start()
+    assert remove_started.wait(1)
+
+    statuses: list[ModelJobStatus] = []
+    query = threading.Thread(target=lambda: statuses.extend(manager.list()))
+    query.start()
+    query.join(0.5)
+
+    assert query.is_alive() is False
+    assert statuses == []
+
+    release_remove.set()
+    remover.join(1)

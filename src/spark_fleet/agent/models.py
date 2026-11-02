@@ -243,6 +243,7 @@ class ModelJobManager:
         self._catalog = catalog
         self._lock = threading.Lock()
         self._jobs: dict[str, _Job] = {}
+        self._removing: set[str] = set()
 
     def start(
         self,
@@ -255,6 +256,8 @@ class ModelJobManager:
         _validate_repo(repo)
         target_root = self._catalog.resolve_root(root, repo=repo, prefer_cached=True)
         with self._lock:
+            if repo in self._removing:
+                raise ModelError(f"removal in progress for {repo}")
             if any(job.repo == repo and job.state in _ACTIVE_STATES for job in self._jobs.values()):
                 raise ModelError(f"download for {repo} is already running")
             job = _Job(
@@ -312,7 +315,14 @@ class ModelJobManager:
         with self._lock:
             if any(job.repo == repo and job.state in _ACTIVE_STATES for job in self._jobs.values()):
                 raise ModelError(f"download in progress for {repo}")
+            if repo in self._removing:
+                raise ModelError(f"removal in progress for {repo}")
+            self._removing.add(repo)
+        try:
             self._catalog.remove(repo, root=root, confirm=confirm, in_use=in_use)
+        finally:
+            with self._lock:
+                self._removing.discard(repo)
 
     def _job(self, job_id: str) -> _Job:
         job = self._jobs.get(job_id)
@@ -479,7 +489,8 @@ def _repo_from_cache_dir(name: str) -> str | None:
 
 def _model_entry(root: Path, path: Path, repo: str) -> ModelEntry:
     try:
-        cached = _snapshot_files(path) and not _has_incomplete_files(path)
+        cached = _snapshot_files(path)
+        incomplete = _has_incomplete_files(path)
         size_bytes = _directory_size(path)
     except OSError as exc:
         return ModelEntry(
@@ -496,7 +507,7 @@ def _model_entry(root: Path, path: Path, repo: str) -> ModelEntry:
         root=root,
         path=path,
         cached=cached,
-        partial=not cached,
+        partial=incomplete or not cached,
         size_bytes=size_bytes,
         error=None,
     )
@@ -510,9 +521,17 @@ def _snapshot_files(path: Path) -> bool:
 
 
 def _has_incomplete_files(path: Path) -> bool:
-    """A cache entry with ``.incomplete`` blobs is an interrupted download."""
+    """Detect orphaned ``blobs/*.incomplete`` downloads left by an interruption.
 
-    return any(candidate.name.endswith(".incomplete") for candidate in path.rglob("*"))
+    Hugging Face reports these separately from committed revisions, so a repo
+    with a complete snapshot and a stale incomplete blob stays cached but is
+    flagged as partial for cleanup.
+    """
+
+    blobs = path / "blobs"
+    if not blobs.is_dir():
+        return False
+    return any(candidate.name.endswith(".incomplete") for candidate in blobs.glob("*.incomplete"))
 
 
 def _directory_size(directory: Path, seen: set[tuple[int, int]] | None = None) -> int:
