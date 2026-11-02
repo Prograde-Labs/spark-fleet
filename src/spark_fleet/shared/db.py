@@ -297,6 +297,89 @@ class Database:
                 ),
             )
 
+    def insert_node(
+        self,
+        node_id: str,
+        *,
+        display_name: str,
+        lan_ip: str,
+        fabric_ip: str,
+        agent_url: str,
+        enabled: bool = True,
+        info: Any = None,
+        now: float | None = None,
+    ) -> None:
+        now = time.time() if now is None else now
+        with self._lock, self._conn:
+            try:
+                self._conn.execute(
+                    """
+                    INSERT INTO nodes (
+                        id, display_name, lan_ip, fabric_ip, agent_url,
+                        enabled, created_at, updated_at, info_json
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        node_id,
+                        display_name,
+                        lan_ip,
+                        fabric_ip,
+                        agent_url,
+                        int(enabled),
+                        now,
+                        now,
+                        _json_encode(info),
+                    ),
+                )
+            except sqlite3.IntegrityError as exc:
+                raise DatabaseError(f"node {node_id} already exists") from exc
+
+    def update_node(
+        self,
+        node_id: str,
+        *,
+        display_name: str | None = None,
+        lan_ip: str | None = None,
+        fabric_ip: str | None = None,
+        agent_url: str | None = None,
+        enabled: bool | None = None,
+        now: float | None = None,
+    ) -> None:
+        updates: dict[str, Any] = {}
+        if display_name is not None:
+            updates["display_name"] = display_name
+        if lan_ip is not None:
+            updates["lan_ip"] = lan_ip
+        if fabric_ip is not None:
+            updates["fabric_ip"] = fabric_ip
+        if agent_url is not None:
+            updates["agent_url"] = agent_url
+        if enabled is not None:
+            updates["enabled"] = int(enabled)
+        if not updates:
+            return
+        updates["updated_at"] = time.time() if now is None else now
+        assignments = ", ".join(f"{column} = ?" for column in updates)
+        with self._lock, self._conn:
+            cursor = self._conn.execute(
+                f"UPDATE nodes SET {assignments} WHERE id = ?",
+                (*updates.values(), node_id),
+            )
+            if cursor.rowcount == 0:
+                raise DatabaseError(f"node {node_id} not found")
+
+    def record_node_seen(self, node_id: str, info: Any, now: float | None = None) -> None:
+        now = time.time() if now is None else now
+        with self._lock, self._conn:
+            self._conn.execute(
+                """
+                UPDATE nodes
+                SET last_seen_at = ?, updated_at = ?, info_json = ?
+                WHERE id = ?
+                """,
+                (now, now, _json_encode(info), node_id),
+            )
+
     def touch_node(self, node_id: str, now: float | None = None) -> None:
         now = time.time() if now is None else now
         with self._lock, self._conn:

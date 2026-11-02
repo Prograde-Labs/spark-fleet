@@ -17,6 +17,7 @@ from urllib.parse import quote, urlparse
 import httpx
 
 DEFAULT_TIMEOUT_SECONDS = 10.0
+STREAM_TIMEOUT = httpx.Timeout(DEFAULT_TIMEOUT_SECONDS, read=None)
 
 
 class AgentError(RuntimeError):
@@ -119,6 +120,7 @@ class AgentClient:
                 "/containers/logs/stream",
                 params={"container_id": container_id, "tail": tail},
                 headers=headers,
+                timeout=STREAM_TIMEOUT,
             ) as response:
                 if response.status_code >= 400:
                     await response.aread()

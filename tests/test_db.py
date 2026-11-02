@@ -142,6 +142,66 @@ def test_touch_node(db):
     assert db.get_node("spark-01")["last_seen_at"] == 123.0
 
 
+def test_insert_node_rejects_duplicate(db):
+    add_node(db)
+
+    with pytest.raises(DatabaseError, match="already exists"):
+        db.insert_node(
+            "spark-01",
+            display_name="Duplicate",
+            lan_ip="192.0.2.240",
+            fabric_ip="198.51.100.12",
+            agent_url="http://spark-01:8092",
+        )
+
+    assert db.get_node("spark-01")["display_name"] == "Spark spark-01"
+
+
+def test_update_node_partially_preserves_other_fields(db):
+    add_node(db)
+    created_at = db.get_node("spark-01")["created_at"]
+
+    db.update_node("spark-01", display_name="Renamed", enabled=False, now=123.0)
+
+    node = db.get_node("spark-01")
+    assert node["display_name"] == "Renamed"
+    assert node["enabled"] is False
+    assert node["lan_ip"] == "192.0.2.239"
+    assert node["fabric_ip"] == "198.51.100.10"
+    assert node["agent_url"] == "http://spark-01:8092"
+    assert node["created_at"] == created_at
+    assert node["updated_at"] == 123.0
+    assert node["info"] == {"gpu": "gb10"}
+
+
+def test_update_node_missing_raises(db):
+    with pytest.raises(DatabaseError, match="not found"):
+        db.update_node("missing", display_name="Renamed")
+
+
+def test_record_node_seen_updates_only_seen_and_info(db):
+    add_node(db)
+    created_at = db.get_node("spark-01")["created_at"]
+
+    db.record_node_seen("spark-01", {"node_id": "spark-01"}, now=456.0)
+
+    node = db.get_node("spark-01")
+    assert node["last_seen_at"] == 456.0
+    assert node["updated_at"] == 456.0
+    assert node["info"] == {"node_id": "spark-01"}
+    assert node["display_name"] == "Spark spark-01"
+    assert node["created_at"] == created_at
+
+
+def test_record_node_seen_does_not_resurrect_deleted_node(db):
+    add_node(db)
+    db.delete_node("spark-01")
+
+    db.record_node_seen("spark-01", {"node_id": "spark-01"}, now=456.0)
+
+    assert db.get_node("spark-01") is None
+
+
 def test_list_and_delete_nodes(db):
     add_node(db, "spark-01")
     add_node(db, "spark-02")

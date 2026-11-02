@@ -167,18 +167,31 @@ def test_get_and_require(registry):
 
 
 class FakeClient:
-    def __init__(self, health=None, info=None, error=None):
+    def __init__(
+        self,
+        health=None,
+        info=None,
+        error=None,
+        health_error=None,
+        info_error=None,
+    ):
         self.health_value = health
         self.info_value = info
         self.error = error
+        self.health_error = health_error
+        self.info_error = info_error
         self.closed = False
 
     async def health(self):
+        if self.health_error is not None:
+            raise self.health_error
         if self.error is not None:
             raise self.error
         return self.health_value
 
     async def info(self):
+        if self.info_error is not None:
+            raise self.info_error
         if self.error is not None:
             raise self.error
         return self.info_value
@@ -233,6 +246,104 @@ async def test_check_unhealthy_reports_error_without_updating(registry, db):
     assert "connection refused" in status.error
     assert client.closed is True
     assert db.get_node("spark-01")["last_seen_at"] is None
+
+
+async def test_check_unhealthy_preserves_last_known_info(registry, db):
+    make_node(registry)
+    db.upsert_node(
+        "spark-01",
+        display_name="Spark 01",
+        lan_ip="192.0.2.239",
+        fabric_ip="198.51.100.10",
+        agent_url="http://192.0.2.239:8092",
+        info={"node_id": "spark-01"},
+    )
+    client = FakeClient(error=AgentUnreachableError("down"))
+    factory, _ = fake_factory(client)
+    registry = NodeRegistry(db, TOKEN, client_factory=factory)
+
+    await registry.check("spark-01")
+
+    stored = db.get_node("spark-01")
+    assert stored["info"] == {"node_id": "spark-01"}
+    assert stored["last_seen_at"] is None
+
+
+async def test_check_partial_failure_closes_client_and_writes_nothing(registry, db):
+    make_node(registry)
+    client = FakeClient(
+        health={"status": "ok"},
+        info_error=AgentUnreachableError("info down"),
+    )
+    factory, _ = fake_factory(client)
+    registry = NodeRegistry(db, TOKEN, client_factory=factory)
+
+    status = await registry.check("spark-01")
+
+    assert status.healthy is False
+    assert "info down" in status.error
+    assert client.closed is True
+    assert db.get_node("spark-01")["last_seen_at"] is None
+    assert db.get_node("spark-01")["info"] is None
+
+
+async def test_check_rejects_mismatched_node_id(registry, db):
+    make_node(registry)
+    client = FakeClient(
+        health={"status": "ok", "node_id": "spark-02"},
+        info={"node_id": "spark-02"},
+    )
+    factory, _ = fake_factory(client)
+    registry = NodeRegistry(db, TOKEN, client_factory=factory)
+
+    status = await registry.check("spark-01")
+
+    assert status.healthy is False
+    assert "spark-02" in status.error
+    assert "spark-01" in status.error
+    assert db.get_node("spark-01")["last_seen_at"] is None
+    assert db.get_node("spark-01")["info"] is None
+
+
+async def test_check_does_not_overwrite_concurrent_update(registry, db):
+    make_node(registry)
+    client = FakeClient(health={"status": "ok"}, info={"node_id": "spark-01"})
+    original_health = client.health
+
+    async def health():
+        db.update_node("spark-01", display_name="Renamed", enabled=False)
+        return await original_health()
+
+    client.health = health
+    factory, _ = fake_factory(client)
+    registry = NodeRegistry(db, TOKEN, client_factory=factory)
+
+    status = await registry.check("spark-01")
+
+    assert status.healthy is True
+    stored = db.get_node("spark-01")
+    assert stored["display_name"] == "Renamed"
+    assert stored["enabled"] is False
+    assert stored["info"] == {"node_id": "spark-01"}
+
+
+async def test_check_does_not_resurrect_deleted_node(registry, db):
+    make_node(registry)
+    client = FakeClient(health={"status": "ok"}, info={"node_id": "spark-01"})
+    original_health = client.health
+
+    async def health():
+        db.delete_node("spark-01")
+        return await original_health()
+
+    client.health = health
+    factory, _ = fake_factory(client)
+    registry = NodeRegistry(db, TOKEN, client_factory=factory)
+
+    with pytest.raises(NodeError, match="not found"):
+        await registry.check("spark-01")
+
+    assert db.get_node("spark-01") is None
 
 
 async def test_check_missing_node_raises(registry):

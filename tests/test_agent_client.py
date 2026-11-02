@@ -6,6 +6,7 @@ import httpx
 import pytest
 
 from spark_fleet.controller.agent_client import (
+    STREAM_TIMEOUT,
     AgentClient,
     AgentError,
     AgentUnreachableError,
@@ -125,6 +126,55 @@ async def test_follow_container_logs_streams_lines():
     assert request.url.params["container_id"] == "abc123"
     assert request.url.params["tail"] == "10"
     assert request.headers["authorization"] == f"Bearer {TOKEN}"
+
+
+async def test_follow_container_logs_reports_http_error():
+    recorder = Recorder([httpx.Response(401, json={"detail": "bad token"})])
+    async with AgentClient(
+        "http://agent:8092", TOKEN, transport=httpx.MockTransport(recorder)
+    ) as client:
+        with pytest.raises(AgentError, match="bad token") as excinfo:
+            async for _line in client.follow_container_logs("abc123"):
+                pass
+
+    assert excinfo.value.status_code == 401
+
+
+async def test_follow_container_logs_reports_transport_error():
+    def handler(request):
+        raise httpx.ConnectError("connection refused")
+
+    async with AgentClient(
+        "http://agent:8092", TOKEN, transport=httpx.MockTransport(handler)
+    ) as client:
+        with pytest.raises(AgentUnreachableError):
+            async for _line in client.follow_container_logs("abc123"):
+                pass
+
+
+async def test_follow_container_logs_disables_read_timeout(monkeypatch):
+    calls = {}
+
+    class FakeStream:
+        async def __aenter__(self):
+            return httpx.Response(200, content=b"one\n")
+
+        async def __aexit__(self, *exc_info):
+            return False
+
+    def stream(method, path, **kwargs):
+        calls.update(kwargs)
+        return FakeStream()
+
+    client = AgentClient("http://agent:8092", TOKEN)
+    monkeypatch.setattr(client._client, "stream", stream)
+
+    lines = [line async for line in client.follow_container_logs("abc123")]
+
+    assert lines == ["one"]
+    assert calls["timeout"] == STREAM_TIMEOUT
+    assert calls["timeout"].read is None
+    await client.aclose()
 
 
 async def test_models_and_download_jobs():

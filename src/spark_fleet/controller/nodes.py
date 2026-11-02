@@ -100,17 +100,18 @@ class NodeRegistry:
         fabric_ip = _validate_ip(fabric_ip, "fabric ip")
         agent_url = _validate_agent_url(agent_url)
         enabled = _validate_enabled(enabled)
-        if self._db.get_node(node_id) is not None:
-            raise NodeError(f"node {node_id} already exists")
-        self._db.upsert_node(
-            node_id,
-            display_name=display_name,
-            lan_ip=lan_ip,
-            fabric_ip=fabric_ip,
-            agent_url=agent_url,
-            enabled=enabled,
-            info=None,
-        )
+        try:
+            self._db.insert_node(
+                node_id,
+                display_name=display_name,
+                lan_ip=lan_ip,
+                fabric_ip=fabric_ip,
+                agent_url=agent_url,
+                enabled=enabled,
+                info=None,
+            )
+        except DatabaseError as exc:
+            raise NodeError(f"node {node_id} already exists") from exc
         return self.require(node_id)
 
     def update(
@@ -123,25 +124,20 @@ class NodeRegistry:
         agent_url: str | None = None,
         enabled: bool | None = None,
     ) -> Node:
-        existing = self.require(node_id)
-        self._db.upsert_node(
-            node_id,
-            display_name=(
-                _validate_display_name(display_name)
-                if display_name is not None
-                else existing.display_name
-            ),
-            lan_ip=(_validate_ip(lan_ip, "lan ip") if lan_ip is not None else existing.lan_ip),
-            fabric_ip=(
-                _validate_ip(fabric_ip, "fabric ip")
-                if fabric_ip is not None
-                else existing.fabric_ip
-            ),
-            agent_url=(
-                _validate_agent_url(agent_url) if agent_url is not None else existing.agent_url
-            ),
-            enabled=(_validate_enabled(enabled) if enabled is not None else existing.enabled),
-        )
+        self.require(node_id)
+        try:
+            self._db.update_node(
+                node_id,
+                display_name=(
+                    _validate_display_name(display_name) if display_name is not None else None
+                ),
+                lan_ip=(_validate_ip(lan_ip, "lan ip") if lan_ip is not None else None),
+                fabric_ip=(_validate_ip(fabric_ip, "fabric ip") if fabric_ip is not None else None),
+                agent_url=(_validate_agent_url(agent_url) if agent_url is not None else None),
+                enabled=(_validate_enabled(enabled) if enabled is not None else None),
+            )
+        except DatabaseError as exc:
+            raise NodeError(str(exc)) from exc
         return self.require(node_id)
 
     def delete(self, node_id: str) -> None:
@@ -182,16 +178,17 @@ class NodeRegistry:
         finally:
             await client.aclose()
 
-        self._db.touch_node(node_id)
-        self._db.upsert_node(
-            node_id,
-            display_name=node.display_name,
-            lan_ip=node.lan_ip,
-            fabric_ip=node.fabric_ip,
-            agent_url=node.agent_url,
-            enabled=node.enabled,
-            info=info,
-        )
+        reported_id = info.get("node_id") if isinstance(info, Mapping) else None
+        if reported_id != node.id:
+            return NodeStatus(
+                node=node,
+                healthy=False,
+                health=health,
+                info=info if isinstance(info, Mapping) else None,
+                error=f"agent reported node id {reported_id!r}, expected {node.id!r}",
+            )
+
+        self._db.record_node_seen(node_id, info)
         return NodeStatus(
             node=self.require(node_id),
             healthy=True,
