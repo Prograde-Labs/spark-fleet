@@ -483,6 +483,14 @@ class Database:
             if cursor.rowcount == 0:
                 raise KeyError(deployment_id)
 
+    def clear_primary(self, now: float | None = None) -> None:
+        now = time.time() if now is None else now
+        with self._lock, self._conn:
+            self._conn.execute(
+                "UPDATE deployments SET is_primary = 0, updated_at = ? WHERE is_primary = 1",
+                (now,),
+            )
+
     def get_deployment(self, deployment_id: str) -> dict[str, Any] | None:
         with self._lock:
             row = self._conn.execute(
