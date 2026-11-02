@@ -14,7 +14,7 @@ import asyncio
 import contextlib
 import logging
 from collections.abc import Awaitable, Callable, Mapping
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Any
 
 import uvicorn
@@ -327,6 +327,7 @@ def create_controller(
         raise ConfigError(f"SPARK_FLEET_WEB_DIST is not a directory: {config.web_dist}")
 
     db = Database(config.db_path)
+    effective = _apply_stored_settings(config, db)
     bus = EventBus()
     runner = JobRunner(db, bus)
     registry = NodeRegistry(db, config.agent_token, client_factory=client_factory)
@@ -335,7 +336,7 @@ def create_controller(
         registry,
         runner,
         token=config.agent_token,
-        rollback_policy=config.rollback_policy,
+        rollback_policy=effective.rollback_policy,
         client_factory=client_factory,
     )
     gateway = FleetGateway(db)
@@ -368,6 +369,10 @@ def create_controller(
         ui_password=config.ui_password,
         client_factory=factory,
         lifespan=lifespan,
+        rollback_policy=effective.rollback_policy,
+        metrics_retention_seconds=effective.metrics_retention_seconds,
+        metrics_sample_interval_seconds=effective.metrics_sample_interval_seconds,
+        node_poll_interval_seconds=effective.node_poll_interval_seconds,
     )
 
     if config.web_dist is not None:
@@ -379,7 +384,7 @@ def create_controller(
             return {"service": "spark-fleet", "version": spark_fleet.__version__}
 
     controller = Controller(
-        config=config,
+        config=effective,
         db=db,
         bus=bus,
         runner=runner,
@@ -391,6 +396,48 @@ def create_controller(
         client_factory=factory,
     )
     return controller
+
+
+def _apply_stored_settings(config: ControllerConfig, db: Database) -> ControllerConfig:
+    """Overlay persisted operator settings on the environment config.
+
+    Settings are read once at startup; a controller restart applies changes.
+    Invalid stored values fall back to the environment defaults.
+    """
+
+    settings = db.list_settings()
+
+    rollback = settings.get("rollback_policy", config.rollback_policy)
+    rollback = str(rollback).strip().lower().replace("_", "-")
+    if rollback not in ("restore", "leave-down"):
+        rollback = config.rollback_policy
+
+    def integer(key: str, default: int, minimum: int, maximum: int) -> int:
+        raw = settings.get(key)
+        if raw is None:
+            return default
+        try:
+            value = int(raw)
+        except (TypeError, ValueError):
+            return default
+        return value if minimum <= value <= maximum else default
+
+    return replace(
+        config,
+        rollback_policy=rollback,
+        metrics_retention_seconds=integer(
+            "metrics_retention_seconds", config.metrics_retention_seconds, 60, 30 * 86400
+        ),
+        metrics_sample_interval_seconds=integer(
+            "metrics_sample_interval_seconds",
+            config.metrics_sample_interval_seconds,
+            1,
+            3600,
+        ),
+        node_poll_interval_seconds=integer(
+            "node_poll_interval_seconds", config.node_poll_interval_seconds, 1, 3600
+        ),
+    )
 
 
 def main() -> None:

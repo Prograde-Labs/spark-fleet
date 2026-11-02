@@ -69,6 +69,10 @@ def build_app(
     ui_password: str | None = None,
     client_factory: Callable[[str, str], AgentClient] | None = None,
     lifespan: Callable[[FastAPI], AsyncIterator[None]] | None = None,
+    rollback_policy: str = "restore",
+    metrics_retention_seconds: int = 86400,
+    metrics_sample_interval_seconds: int = 10,
+    node_poll_interval_seconds: int = 15,
 ) -> FastAPI:
     app = FastAPI(title="spark-fleet controller", lifespan=lifespan)
     recipes_dir = Path(recipes_dir)
@@ -101,6 +105,20 @@ def build_app(
     def logout(response: Response) -> dict[str, Any]:
         response.delete_cookie(SESSION_COOKIE_NAME, path="/")
         return {"authenticated": False}
+
+    @app.get("/api/config", dependencies=[Depends(session_dep)])
+    def controller_config() -> dict[str, Any]:
+        return {
+            "rollbackPolicy": rollback_policy,
+            "metricsRetentionSeconds": metrics_retention_seconds,
+            "metricsSampleIntervalSeconds": metrics_sample_interval_seconds,
+            "nodePollIntervalSeconds": node_poll_interval_seconds,
+            "authEnabled": session_secret is not None,
+            "gateway": {
+                "activeAlias": "spark-active",
+                "modelsPath": "/v1/models",
+            },
+        }
 
     @app.get("/api/session")
     def session_status(request: Request) -> dict[str, Any]:

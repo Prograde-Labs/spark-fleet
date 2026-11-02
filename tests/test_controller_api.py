@@ -1253,3 +1253,14 @@ def test_node_container_logs_and_stream(env):
     assert logs.json()["logs"] == "line one\nline two"
     assert STATE["logs"] == {"container_id": "c1", "tail": 20}
     assert stream.text == "stream one\nstream two\n"
+
+
+def test_config_endpoint_reports_effective_settings(env):
+    body = env.client.get("/api/config").json()
+
+    assert body["rollbackPolicy"] == "restore"
+    assert body["metricsRetentionSeconds"] == 86400
+    assert body["metricsSampleIntervalSeconds"] == 10
+    assert body["nodePollIntervalSeconds"] == 15
+    assert body["authEnabled"] is False
+    assert body["gateway"] == {"activeAlias": "spark-active", "modelsPath": "/v1/models"}

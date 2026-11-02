@@ -459,3 +459,37 @@ async def test_poll_metrics_once_skips_disabled_nodes(controller):
 
     assert errors == {}
     assert controller.metrics.latest_node_metrics("spark-off") == {}
+
+
+def test_stored_settings_override_environment_defaults(tmp_path):
+    config = make_config(tmp_path)
+    first = create_controller(config, client_factory=FakeAgentClient)
+    first.db.set_setting("rollback_policy", "leave-down")
+    first.db.set_setting("metrics_retention_seconds", "120")
+    first.db.set_setting("metrics_sample_interval_seconds", "5")
+    first.db.set_setting("node_poll_interval_seconds", "30")
+    first.db.close()
+
+    second = create_controller(config, client_factory=FakeAgentClient)
+
+    assert second.config.rollback_policy == "leave-down"
+    assert second.config.metrics_retention_seconds == 120
+    assert second.config.metrics_sample_interval_seconds == 5
+    assert second.config.node_poll_interval_seconds == 30
+    second.db.close()
+
+
+def test_invalid_stored_settings_fall_back(tmp_path):
+    config = make_config(tmp_path)
+    first = create_controller(config, client_factory=FakeAgentClient)
+    first.db.set_setting("rollback_policy", "explode")
+    first.db.set_setting("metrics_retention_seconds", "not-a-number")
+    first.db.set_setting("node_poll_interval_seconds", "99999")
+    first.db.close()
+
+    second = create_controller(config, client_factory=FakeAgentClient)
+
+    assert second.config.rollback_policy == "restore"
+    assert second.config.metrics_retention_seconds == 86400
+    assert second.config.node_poll_interval_seconds == 15
+    second.db.close()

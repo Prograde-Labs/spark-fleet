@@ -100,6 +100,7 @@ async function request(path, { method = 'GET', body, headers = {}, signal } = {}
 
 export const api = {
   health: () => request('/health'),
+  config: () => request('/api/config'),
 
   async session() {
     const session = await request('/api/session')
