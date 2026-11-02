@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import json
 import subprocess
+from collections.abc import Iterator, Mapping, Sequence
 from pathlib import Path
 from typing import Any
 
@@ -72,31 +73,104 @@ def compose_down(file: Path, project: str, *, timeout: float = DEFAULT_TIMEOUT_S
 def list_containers(project: str, *, timeout: float = 60.0) -> list[dict[str, Any]]:
     """List containers labelled with ``com.docker.compose.project``."""
 
+    return list_containers_by_labels({"com.docker.compose.project": project}, timeout=timeout)
+
+
+def list_containers_by_labels(
+    labels: Mapping[str, str | None], *, timeout: float = 60.0
+) -> list[dict[str, Any]]:
+    """List all containers matching every label filter.
+
+    A ``None`` value filters on label presence only.
+    """
+
+    args = [DOCKER, "ps", "-a"]
+    for key, value in sorted(labels.items()):
+        spec = f"label={key}" if value is None else f"label={key}={value}"
+        args.extend(["--filter", spec])
+    args.extend(["--format", "{{json .}}"])
+
+    result = _run(args, timeout)
+    _require_success(result, "docker ps")
+    return _parse_ndjson(result.stdout, "docker ps")
+
+
+def inspect_containers(ids: Sequence[str], *, timeout: float = 60.0) -> list[dict[str, Any]]:
+    """Return ``docker inspect`` records for the given container IDs."""
+
+    if not ids:
+        return []
+    result = _run([DOCKER, "inspect", *ids], timeout)
+    _require_success(result, "docker inspect")
+    try:
+        data = json.loads(result.stdout)
+    except json.JSONDecodeError as exc:
+        raise DockerError("docker inspect returned invalid JSON") from exc
+    if not isinstance(data, list) or not all(isinstance(item, dict) for item in data):
+        raise DockerError("docker inspect returned unexpected JSON")
+    return data
+
+
+def container_stats(ids: Sequence[str], *, timeout: float = 60.0) -> list[dict[str, Any]]:
+    """Return one-shot ``docker stats`` samples for the given container IDs."""
+
+    if not ids:
+        return []
     result = _run(
-        [
-            DOCKER,
-            "ps",
-            "-a",
-            "--filter",
-            f"label=com.docker.compose.project={project}",
-            "--format",
-            "{{json .}}",
-        ],
+        [DOCKER, "stats", "--no-stream", "--format", "{{json .}}", *ids],
         timeout,
     )
-    _require_success(result, f"docker ps for {project}")
+    _require_success(result, "docker stats")
+    return _parse_ndjson(result.stdout, "docker stats")
 
+
+def container_logs(container_id: str, *, tail: int = 200, timeout: float = 60.0) -> str:
+    """Return the last ``tail`` lines of a container's combined output."""
+
+    result = _run([DOCKER, "logs", "--tail", str(tail), container_id], timeout)
+    _require_success(result, f"docker logs for {container_id}")
+    return result.stdout
+
+
+def follow_container_logs(container_id: str, *, tail: int = 200) -> Iterator[str]:
+    """Yield a container's log lines as they arrive until the stream closes."""
+
+    try:
+        process = subprocess.Popen(
+            [DOCKER, "logs", "--follow", "--tail", str(tail), container_id],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+        )
+    except OSError as exc:
+        raise DockerError(f"could not run docker logs for {container_id}: {exc}") from exc
+
+    assert process.stdout is not None
+    try:
+        yield from process.stdout
+    finally:
+        if process.poll() is None:
+            process.terminate()
+            try:
+                process.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                process.kill()
+        if hasattr(process.stdout, "close"):
+            process.stdout.close()
+
+
+def _parse_ndjson(output: str, description: str) -> list[dict[str, Any]]:
     rows: list[dict[str, Any]] = []
-    for line in result.stdout.splitlines():
+    for line in output.splitlines():
         line = line.strip()
         if not line:
             continue
         try:
             row = json.loads(line)
         except json.JSONDecodeError as exc:
-            raise DockerError(f"docker ps returned invalid JSON: {line!r}") from exc
+            raise DockerError(f"{description} returned invalid JSON: {line!r}") from exc
         if not isinstance(row, dict):
-            raise DockerError(f"docker ps returned unexpected JSON: {line!r}")
+            raise DockerError(f"{description} returned unexpected JSON: {line!r}")
         rows.append(row)
     return rows
 
