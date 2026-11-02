@@ -4,7 +4,12 @@ import sqlite3
 
 import pytest
 
-from spark_fleet.shared.db import SCHEMA_VERSION, Database, DatabaseError
+from spark_fleet.shared.db import (
+    SCHEMA_VERSION,
+    Database,
+    DatabaseError,
+    _split_statements,
+)
 
 
 @pytest.fixture
@@ -417,7 +422,14 @@ def test_role_reassignment_resets_status(db):
     add_node(db, "spark-02")
     db.create_deployment("dep-1", "demo-glm", "demo-glm", "deployment", {})
     db.upsert_role(
-        "dep-1", "head", "spark-01", "heavy", 0, status="running", container_id="container-1"
+        "dep-1",
+        "head",
+        "spark-01",
+        "heavy",
+        0,
+        config_hash="abc",
+        status="running",
+        container_id="container-1",
     )
 
     db.upsert_role("dep-1", "head", "spark-02", "heavy", 0)
@@ -426,6 +438,7 @@ def test_role_reassignment_resets_status(db):
     assert head["node_id"] == "spark-02"
     assert head["status"] == "pending"
     assert head["container_id"] is None
+    assert head["config_hash"] is None
 
 
 def test_update_job_requires_a_field(db):
@@ -545,7 +558,9 @@ def test_failed_open_closes_connection(tmp_path):
 
     connection = sqlite3.connect(path)
     try:
-        connection.execute("SELECT 1")
+        connection.execute("CREATE TABLE probe (x INTEGER)")
+        connection.execute("INSERT INTO probe VALUES (1)")
+        connection.commit()
     finally:
         connection.close()
 
@@ -562,3 +577,58 @@ def test_migration_failure_is_wrapped(tmp_path):
 
     with pytest.raises(DatabaseError, match="migration failed"):
         Database(path)
+
+
+def test_directory_path_rejected(tmp_path):
+    with pytest.raises(DatabaseError, match="open failed"):
+        Database(tmp_path)
+
+
+def test_legacy_database_converts_to_incremental_vacuum(tmp_path):
+    path = tmp_path / "fleet.sqlite"
+    database = Database(path)
+    database.close()
+
+    connection = sqlite3.connect(path)
+    connection.execute("PRAGMA auto_vacuum = NONE")
+    connection.execute("VACUUM")
+    assert connection.execute("PRAGMA auto_vacuum").fetchone()[0] == 0
+    connection.close()
+
+    database = Database(path)
+    try:
+        assert database.auto_vacuum_mode == 2
+        database.incremental_vacuum()
+    finally:
+        database.close()
+
+
+def test_split_statements_handles_semicolon_in_literal():
+    script = "CREATE TABLE t (x TEXT DEFAULT ';');\nCREATE TABLE u (y INT);\n"
+
+    assert len(_split_statements(script)) == 2
+
+
+def test_migration_rolls_back_on_failure(tmp_path):
+    path = tmp_path / "fleet.sqlite"
+    connection = sqlite3.connect(path)
+    connection.execute("CREATE TABLE settings (key TEXT PRIMARY KEY, value TEXT NOT NULL)")
+    connection.execute("PRAGMA user_version = 0")
+    connection.commit()
+    connection.close()
+
+    with pytest.raises(DatabaseError, match="migration failed"):
+        Database(path)
+
+    connection = sqlite3.connect(path)
+    try:
+        tables = {
+            row[0]
+            for row in connection.execute("SELECT name FROM sqlite_master WHERE type = 'table'")
+        }
+        version = connection.execute("PRAGMA user_version").fetchone()[0]
+    finally:
+        connection.close()
+
+    assert tables == {"settings"}
+    assert version == 0

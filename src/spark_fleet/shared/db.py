@@ -143,8 +143,8 @@ def _split_statements(script: str) -> list[str]:
 
     statements: list[str] = []
     buffer = ""
-    for line in script.splitlines(keepends=True):
-        buffer += line
+    for character in script:
+        buffer += character
         if sqlite3.complete_statement(buffer):
             statement = buffer.strip()
             if statement:
@@ -163,7 +163,10 @@ class Database:
         self._lock = threading.RLock()
 
         if self.path != ":memory:":
-            Path(self.path).parent.mkdir(parents=True, exist_ok=True)
+            try:
+                Path(self.path).parent.mkdir(parents=True, exist_ok=True)
+            except OSError as exc:
+                raise DatabaseError(f"database open failed: {exc}") from exc
 
         try:
             self._conn = sqlite3.connect(self.path, check_same_thread=False)
@@ -174,15 +177,27 @@ class Database:
             self._conn.row_factory = sqlite3.Row
             self._conn.execute("PRAGMA busy_timeout = 5000")
             self._conn.execute("PRAGMA foreign_keys = ON")
-            # auto_vacuum must be set before the database header is written.
-            self._conn.execute("PRAGMA auto_vacuum = INCREMENTAL")
+
+            version = int(self._conn.execute("PRAGMA user_version").fetchone()[0])
+            if version > SCHEMA_VERSION:
+                raise DatabaseError(
+                    f"database schema version {version} is newer than supported {SCHEMA_VERSION}"
+                )
+
+            if self.auto_vacuum_mode != 2:
+                try:
+                    self._conn.execute("PRAGMA auto_vacuum = INCREMENTAL")
+                    if version > 0:
+                        # Existing databases need a one-time rebuild for the
+                        # pragma to take effect.
+                        self._conn.execute("VACUUM")
+                except sqlite3.OperationalError:
+                    # Read-only databases cannot be rebuilt; leave the mode as is.
+                    pass
+
             if self.path != ":memory:":
                 self._conn.execute("PRAGMA journal_mode = WAL")
-            if self.auto_vacuum_mode != 2:
-                # An existing database written before auto-vacuum was enabled
-                # needs a one-time rebuild for the pragma to take effect.
-                self._conn.execute("PRAGMA auto_vacuum = INCREMENTAL")
-                self._conn.execute("VACUUM")
+
             self._migrate()
         except DatabaseError:
             self._conn.close()
