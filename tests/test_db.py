@@ -848,6 +848,45 @@ def test_connection_wrapper_supports_context_manager():
         wrapper.close()
 
 
+def test_connection_wrapper_commits_on_exit(tmp_path):
+    path = tmp_path / "wrapper.sqlite"
+    connection = sqlite3.connect(path)
+    wrapper = _ConnectionWrapper(connection)
+    try:
+        with wrapper:
+            wrapper.execute("CREATE TABLE t (x INTEGER)")
+            wrapper.execute("INSERT INTO t VALUES (1)")
+        assert not connection.in_transaction
+    finally:
+        wrapper.close()
+
+    reopened = sqlite3.connect(path)
+    try:
+        assert reopened.execute("SELECT COUNT(*) FROM t").fetchone()[0] == 1
+    finally:
+        reopened.close()
+
+
+def test_connection_wrapper_rolls_back_on_exception(tmp_path):
+    path = tmp_path / "wrapper.sqlite"
+    connection = sqlite3.connect(path)
+    wrapper = _ConnectionWrapper(connection)
+    try:
+        with pytest.raises(RuntimeError, match="boom"):
+            with wrapper:
+                wrapper.execute("CREATE TABLE t (x INTEGER)")
+                wrapper.execute("INSERT INTO t VALUES (1)")
+                raise RuntimeError("boom")
+    finally:
+        wrapper.close()
+
+    reopened = sqlite3.connect(path)
+    try:
+        assert reopened.execute("SELECT COUNT(*) FROM t").fetchone()[0] == 0
+    finally:
+        reopened.close()
+
+
 def test_conversion_mode_check_rejects_noop(tmp_path, monkeypatch):
     path = tmp_path / "fleet.sqlite"
     _make_legacy_database(path)
