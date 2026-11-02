@@ -91,6 +91,8 @@ class DeploymentManager:
         deployment = self._require_deployment(deployment_id)
         recipe = self._recipe(deployment)
         self._validate_load(deployment, recipe, allow_loaded=False)
+        if primary and recipe.spec.mode != "deployment":
+            raise DeploymentError("only deployment recipes can be primary")
         return await self._runner.submit(
             "deployment.load",
             {"deployment_id": deployment_id, "primary": primary},
@@ -109,6 +111,8 @@ class DeploymentManager:
         previous_recipe = self._recipe(deployment)
         current = recipe if recipe is not None else previous_recipe
         self._validate_load(deployment, current, allow_loaded=True)
+        if primary and current.spec.mode != "deployment":
+            raise DeploymentError("only deployment recipes can be primary")
         payload = {
             "deployment_id": deployment_id,
             "primary": primary,
@@ -163,6 +167,8 @@ class DeploymentManager:
             allow_loaded=job.kind == "deployment.redeploy",
         )
         primary_requested = bool(payload.get("primary"))
+        if primary_requested and recipe.spec.mode != "deployment":
+            raise DeploymentError("only deployment recipes can be primary")
         was_loaded = deployment["status"] == "loaded"
         stop_recipe = self._recipe(deployment)
 
@@ -203,8 +209,12 @@ class DeploymentManager:
             self._db.update_deployment(
                 deployment_id, status="loaded", error=None, loaded_at=time.time()
             )
-            has_primary = any(item["is_primary"] for item in self._db.list_deployments())
-            if primary_requested or not has_primary:
+            has_primary = any(
+                item["is_primary"]
+                for item in self._db.list_deployments()
+                if item["status"] == "loaded"
+            )
+            if recipe.spec.mode == "deployment" and (primary_requested or not has_primary):
                 self._db.set_primary(deployment_id)
             self._event(job, "deployment loaded", phase="loaded")
             return {"deployment_id": deployment_id, "status": "loaded"}
@@ -256,7 +266,7 @@ class DeploymentManager:
                     self._db.update_deployment(deployment_id, status="failed", error=error)
                     if deployment["is_primary"]:
                         self._db.clear_primary()
-            if stop_attempted or started:
+            if displaced or stop_attempted or started:
                 rollback_errors = await self._rollback(displaced, clients, job)
                 if rollback_errors:
                     error = f"{error}; rollback: {'; '.join(rollback_errors)}"
@@ -283,6 +293,8 @@ class DeploymentManager:
         if errors:
             message = "; ".join(errors)
             self._db.update_deployment(deployment_id, status="failed", error=message)
+            if deployment["is_primary"]:
+                self._db.clear_primary()
             raise DeploymentError(message)
         self._db.update_deployment(deployment_id, status="unloaded", error=None)
         if deployment["is_primary"]:
@@ -335,6 +347,9 @@ class DeploymentManager:
                 status="starting",
             )
 
+            # Record the project before ``up`` so a failure after Docker has
+            # created containers still gets a best-effort down.
+            started.append((role, project, client))
             try:
                 statuses = await client.up_compose(project, rendered_role.compose)
             except AgentError as exc:
@@ -350,7 +365,6 @@ class DeploymentManager:
                 status="starting",
                 container_id=container_id,
             )
-            started.append((role, project, client))
 
             self._event(job, f"waiting for role {role.name} readiness", phase="readiness")
             try:

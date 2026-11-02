@@ -66,7 +66,7 @@ class FakeAgentClient:
         )
 
     async def compose_status(self, project):
-        if STATE.get("compose_error"):
+        if STATE.get("compose_error") or self.base_url == STATE.get("compose_error_url"):
             raise AgentError("agent down")
         return STATE.get("compose", {}).get(project, [])
 
@@ -387,3 +387,59 @@ def test_main_runs_uvicorn(monkeypatch):
     main_module.main()
 
     assert calls == [((app,), {"host": "127.0.0.1", "port": 8091, "log_level": "info"})]
+
+
+MULTI_RECIPE_YAML = """\
+apiVersion: spark-fleet/v1
+kind: Recipe
+metadata:
+  name: multi
+spec:
+  mode: deployment
+  runtime: custom
+  model:
+    repo: org/model
+    servedName: MULTI
+  gateway:
+    aliases: [multi]
+  roles:
+    - name: worker
+      node: spark-02
+      class: heavy
+      startOrder: 10
+      service:
+        image: img
+    - name: head
+      node: spark-01
+      class: heavy
+      startOrder: 20
+      inferencePort: 8888
+      service:
+        image: img
+"""
+
+
+async def test_reconcile_fails_on_definite_problem_despite_unreachable_agent(controller):
+    add_node(controller.db, "spark-01")
+    add_node(controller.db, "spark-02")
+    recipe = parse_recipe_yaml(MULTI_RECIPE_YAML).model_dump(by_alias=True, exclude_unset=True)
+    controller.db.create_deployment(
+        "dep-1", "multi", "multi", "deployment", recipe, status="loaded"
+    )
+    controller.db.upsert_role(
+        "dep-1", "head", "spark-01", "heavy", 20, status="running", container_id="c1"
+    )
+    controller.db.upsert_role(
+        "dep-1", "worker", "spark-02", "heavy", 10, status="running", container_id="c2"
+    )
+    STATE["compose"] = {
+        "spark-fleet-multi-head": [
+            {"id": "c1", "name": "spark-fleet-multi-head", "state": "exited"}
+        ]
+    }
+    STATE["compose_error_url"] = "http://192.0.2.79:8092"
+
+    results = await controller.reconcile()
+
+    assert results[0]["status"] == "failed"
+    assert controller.db.get_deployment("dep-1")["status"] == "failed"

@@ -26,6 +26,7 @@ ENV_KEY_PATTERN = re.compile(r"[A-Za-z_][A-Za-z0-9_]{0,127}")
 _REQUIRED_LABELS = (LABEL_DEPLOYMENT, LABEL_RECIPE, LABEL_ROLE)
 _CONTAINER_PREFIX = "spark-fleet-job-"
 _CANCEL_GRACE_SECONDS = 5.0
+_MAX_LOG_CHARS = 1_000_000
 
 
 class JobError(RuntimeError):
@@ -50,6 +51,7 @@ class OneShotJob:
         self._process = process
         self._cancelled = False
         self._chunks: list[str] = []
+        self._log_chars = 0
         self._reader = threading.Thread(target=self._drain, daemon=True)
         self._reader.start()
 
@@ -60,6 +62,14 @@ class OneShotJob:
         try:
             for chunk in stdout:
                 self._chunks.append(chunk)
+                self._log_chars += len(chunk)
+                while self._log_chars > _MAX_LOG_CHARS and self._chunks:
+                    if len(self._chunks) > 1:
+                        self._log_chars -= len(self._chunks.pop(0))
+                    else:
+                        overflow = self._log_chars - _MAX_LOG_CHARS
+                        self._chunks[0] = self._chunks[0][overflow:]
+                        self._log_chars = _MAX_LOG_CHARS
         except (OSError, ValueError):
             # The pipe closed while cancelling; keep whatever was captured.
             pass
@@ -89,7 +99,9 @@ class OneShotJob:
             "name": self._name,
             "state": state,
             "exit_code": exit_code,
-            "logs": "".join(tuple(self._chunks)),
+            # Logs are only meaningful once the process exits; polling a chatty
+            # job every second should not resend the whole buffer.
+            "logs": "" if exit_code is None else "".join(tuple(self._chunks)),
             "cancelled": self._cancelled,
         }
 
@@ -203,6 +215,7 @@ class JobManager:
 
     def __init__(self) -> None:
         self._jobs: dict[str, OneShotJob] = {}
+        self._lock = threading.Lock()
 
     def start(
         self,
@@ -214,46 +227,54 @@ class JobManager:
         volumes: Sequence[str] = (),
         environment: Mapping[str, str] | None = None,
     ) -> OneShotJob:
-        existing = self._jobs.get(name)
-        if existing is not None and existing.running:
-            raise JobError(f"job {name!r} is already running")
-        job = start_job(
-            name,
-            image,
-            command,
-            labels=labels,
-            volumes=volumes,
-            environment=environment,
-        )
-        self._jobs[name] = job
+        with self._lock:
+            existing = self._jobs.get(name)
+            if existing is not None and existing.running:
+                raise JobError(f"job {name!r} is already running")
+            job = start_job(
+                name,
+                image,
+                command,
+                labels=labels,
+                volumes=volumes,
+                environment=environment,
+            )
+            self._jobs[name] = job
         return job
 
     def active(self) -> list[str]:
-        return sorted(name for name, job in self._jobs.items() if job.running)
+        with self._lock:
+            return sorted(name for name, job in self._jobs.items() if job.running)
 
     def status(self, name: str) -> dict[str, Any]:
-        job = self._jobs.get(name)
+        with self._lock:
+            job = self._jobs.get(name)
         if job is None:
             raise JobError(f"unknown job: {name}")
         return job.snapshot()
 
     def list(self) -> list[dict[str, Any]]:
-        return [job.snapshot() for job in self._jobs.values()]
+        with self._lock:
+            jobs = list(self._jobs.values())
+        return [job.snapshot() for job in jobs]
 
     def cancel(self, name: str) -> bool:
-        job = self._jobs.get(name)
-        if job is None or not job.running:
-            self._jobs.pop(name, None)
-            return False
+        with self._lock:
+            job = self._jobs.get(name)
+            if job is None or not job.running:
+                self._jobs.pop(name, None)
+                return False
         job.cancel()
         return True
 
     def wait(self, name: str, timeout: float | None = None) -> JobResult:
-        job = self._jobs.get(name)
+        with self._lock:
+            job = self._jobs.get(name)
         if job is None:
             raise JobError(f"unknown job: {name}")
         result = job.wait(timeout=timeout)
-        self._jobs.pop(name, None)
+        with self._lock:
+            self._jobs.pop(name, None)
         return result
 
 

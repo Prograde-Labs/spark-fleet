@@ -16,6 +16,7 @@ import shlex
 import uuid
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any
 
 import httpx
@@ -23,6 +24,7 @@ import yaml
 
 from spark_fleet.shared.db import Database
 from spark_fleet.shared.recipe import (
+    ALIAS_PATTERN,
     NAME_PATTERN,
     Recipe,
     RecipeError,
@@ -32,6 +34,7 @@ from spark_fleet.shared.recipe import (
 from spark_fleet.shared.render import NodeAddress
 
 _NAME_RE = re.compile(NAME_PATTERN)
+_ALIAS_RE = re.compile(ALIAS_PATTERN)
 _HEAVY_SUFFIXES = ("-head", "-worker", "-rank0", "-rank1", "-rank2", "-rank3")
 _HELPER_PATTERNS = ("pull", "staging", "fetch")
 _SKIP_PATTERNS = ("log-server", "log_server", "logserver")
@@ -75,14 +78,25 @@ class ImportPlan:
     proposals: tuple[ImportProposal, ...]
     skipped: tuple[SkippedWorkload, ...]
 
-    def apply(self, db: Database, *, confirm: bool = False) -> list[str]:
+    def apply(
+        self,
+        db: Database,
+        *,
+        confirm: bool = False,
+        recipes_dir: Path | None = None,
+    ) -> list[str]:
         if not confirm:
             raise ImporterError("import requires explicit confirmation")
+        names = [proposal.recipe.metadata.name for proposal in self.proposals]
+        duplicates = sorted({name for name in names if names.count(name) > 1})
+        if duplicates:
+            raise ImporterError(f"duplicate recipe names: {', '.join(duplicates)}")
+        for name in names:
+            if db.get_deployment_by_name(name) is not None:
+                raise ImporterError(f"deployment {name!r} already exists")
         created: list[str] = []
         for proposal in self.proposals:
             name = proposal.recipe.metadata.name
-            if db.get_deployment_by_name(name) is not None:
-                raise ImporterError(f"deployment {name!r} already exists")
             deployment_id = uuid.uuid4().hex
             db.create_deployment(
                 deployment_id,
@@ -92,6 +106,11 @@ class ImportPlan:
                 proposal.recipe.model_dump(by_alias=True, exclude_unset=True),
                 status="pending",
             )
+            if recipes_dir is not None:
+                recipes_dir.mkdir(parents=True, exist_ok=True)
+                (recipes_dir / f"{name}.yaml").write_text(
+                    recipe_to_yaml(proposal.recipe), encoding="utf-8"
+                )
             created.append(deployment_id)
         return created
 
@@ -170,6 +189,7 @@ class Importer:
 
     async def plan(self, sources: Mapping[str, tuple[str, OldControllerClient]]) -> ImportPlan:
         workloads: list[OldWorkload] = []
+        skipped: list[SkippedWorkload] = []
         for node_id, (_url, client) in sources.items():
             for item in await client.workloads():
                 name = item.get("name")
@@ -178,9 +198,11 @@ class Importer:
                 try:
                     config_text = await client.instance(name)
                     config = yaml.safe_load(config_text)
-                except (ImporterError, yaml.YAMLError):
+                except (ImporterError, yaml.YAMLError) as exc:
+                    skipped.append(SkippedWorkload(name, f"could not read instance: {exc}"))
                     continue
                 if not isinstance(config, Mapping):
+                    skipped.append(SkippedWorkload(name, "instance is not a mapping"))
                     continue
                 workloads.append(
                     OldWorkload(
@@ -204,10 +226,12 @@ class Importer:
                         config=config,
                     )
                 )
-        return self._build_plan(workloads)
+        return self._build_plan(workloads, skipped)
 
-    def _build_plan(self, workloads: Sequence[OldWorkload]) -> ImportPlan:
-        skipped: list[SkippedWorkload] = []
+    def _build_plan(
+        self, workloads: Sequence[OldWorkload], skipped: list[SkippedWorkload] | None = None
+    ) -> ImportPlan:
+        skipped = list(skipped or [])
         heavy = [item for item in workloads if item.workload_class == "heavy"]
         lights = [item for item in workloads if item.workload_class == "light"]
 
@@ -269,22 +293,26 @@ class Importer:
         rebuilt: list[ImportProposal] = []
         for proposal in proposals:
             recipe_dict = group_recipes.get(proposal.name)
-            if recipe_dict is not None:
-                recipe = parse_recipe(recipe_dict)
-                rebuilt.append(
-                    ImportProposal(
-                        name=proposal.name,
-                        recipe=recipe,
-                        old_yaml=proposal.old_yaml,
-                        diff=_diff(
-                            proposal.old_yaml,
-                            recipe_to_yaml(recipe),
-                            proposal.name,
-                        ),
-                    )
-                )
-            else:
+            if recipe_dict is None:
                 rebuilt.append(proposal)
+                continue
+            try:
+                recipe = parse_recipe(recipe_dict)
+            except RecipeError as exc:
+                skipped.append(SkippedWorkload(proposal.name, str(exc)))
+                continue
+            rebuilt.append(
+                ImportProposal(
+                    name=proposal.name,
+                    recipe=recipe,
+                    old_yaml=proposal.old_yaml,
+                    diff=_diff(
+                        proposal.old_yaml,
+                        recipe_to_yaml(recipe),
+                        proposal.name,
+                    ),
+                )
+            )
         return ImportPlan(tuple(rebuilt), tuple(skipped))
 
     def _deployment_recipe(self, name: str, members: Sequence[OldWorkload]) -> dict[str, Any]:
@@ -298,11 +326,14 @@ class Importer:
                 role_name = "head"
                 start_order = 20
                 head_seen = True
-                readiness = {
-                    "type": "http",
-                    "path": "/v1/models",
-                    "timeoutSeconds": 3600,
-                }
+                if item.inference_port is not None:
+                    readiness = {
+                        "type": "http",
+                        "path": "/v1/models",
+                        "timeoutSeconds": 3600,
+                    }
+                else:
+                    readiness = {"type": "running", "timeoutSeconds": 3600}
             else:
                 worker_index += 1
                 role_name = "worker" if worker_index == 1 else f"worker-{worker_index}"
@@ -510,9 +541,11 @@ def _model_spec(item: OldWorkload) -> dict[str, Any] | None:
     served = item.served_model or _flag(_command(item.config), "--served-model-name")
     if not served:
         served = item.name
+    if not _ALIAS_RE.fullmatch(served):
+        served = _sanitize(served)
     return {
         "repo": item.models[0],
-        "servedName": _sanitize(served),
+        "servedName": served,
         "extraRepos": list(item.models[1:]),
     }
 
@@ -538,23 +571,50 @@ def _attach_prepare(
 ) -> str | None:
     for name in sorted(group_recipes, key=len, reverse=True):
         if item.name.startswith(name):
-            service = replace(item.config.get("services", {}).get("workload", {}))
+            services = item.config.get("services")
+            workload = services.get("workload") if isinstance(services, Mapping) else None
+            if not isinstance(workload, Mapping):
+                return None
+            service = replace(dict(workload))
+            image = service.get("image")
+            if not isinstance(image, str) or not image:
+                return None
             command = service.get("command")
             if isinstance(command, str):
                 command = shlex.split(command)
             if not isinstance(command, list) or not command:
                 return None
+            volumes = service.get("volumes", [])
+            if not isinstance(volumes, list):
+                volumes = []
             prepare = {
                 "name": _sanitize(item.name),
                 "node": item.node_id,
-                "image": service.get("image"),
+                "image": image,
                 "command": [str(part) for part in command],
-                "volumes": service.get("volumes", []),
-                "environment": service.get("environment", {}),
+                "volumes": [volume for volume in volumes if isinstance(volume, str)],
+                "environment": _prepare_environment(service.get("environment")),
             }
             group_recipes[name].setdefault("spec", {}).setdefault("prepare", []).append(prepare)
             return name
     return None
+
+
+def _prepare_environment(value: Any) -> dict[str, Any]:
+    if isinstance(value, Mapping):
+        return {
+            str(key): item
+            for key, item in value.items()
+            if isinstance(item, (str, int, float, bool))
+        }
+    if isinstance(value, list):
+        result: dict[str, Any] = {}
+        for entry in value:
+            key, separator, item = str(entry).partition("=")
+            if separator:
+                result[key] = item
+        return result
+    return {}
 
 
 def _sanitize(value: str) -> str:

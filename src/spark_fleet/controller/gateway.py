@@ -14,6 +14,7 @@ metrics store.
 from __future__ import annotations
 
 import json
+import sqlite3
 import time
 from collections.abc import AsyncIterator, Mapping
 from dataclasses import dataclass
@@ -26,6 +27,14 @@ from spark_fleet.shared.db import Database
 from spark_fleet.shared.recipe import RecipeError, parse_recipe
 
 LOADING_STATUSES = frozenset({"pending", "loading", "starting"})
+_STRIP_REQUEST = frozenset(
+    {
+        "authorization",
+        "cookie",
+        "x-csrf-token",
+    }
+)
+_RESPONSE_STRIP = frozenset({"content-length", "content-encoding"})
 _HOP_BY_HOP = frozenset(
     {
         "host",
@@ -144,18 +153,25 @@ class InferenceCounters:
         }
 
     def flush(self, store: MetricsStore, *, ts: float | None = None) -> None:
-        for deployment_id, counter in self._counters.items():
-            store.record_gateway_sample(
-                deployment_id,
-                requests=counter.requests,
-                errors=counter.errors,
-                latency_ms=counter.average_latency_ms(),
-                ttft_ms=counter.average_ttft_ms(),
-                prompt_tokens=counter.prompt_tokens,
-                completion_tokens=counter.completion_tokens,
-                ts=ts,
-            )
-        self._counters.clear()
+        try:
+            for deployment_id, counter in self._counters.items():
+                try:
+                    store.record_gateway_sample(
+                        deployment_id,
+                        requests=counter.requests,
+                        errors=counter.errors,
+                        latency_ms=counter.average_latency_ms(),
+                        ttft_ms=counter.average_ttft_ms(),
+                        prompt_tokens=counter.prompt_tokens,
+                        completion_tokens=counter.completion_tokens,
+                        ts=ts,
+                    )
+                except (ValueError, sqlite3.Error):
+                    # A deployment may have been deleted between routing and
+                    # flushing; drop that sample rather than wedging the loop.
+                    continue
+        finally:
+            self._counters.clear()
 
 
 class FleetGateway:
@@ -197,7 +213,7 @@ class FleetGateway:
             heavy = [role for role in recipe.spec.roles if role.class_ == "heavy"]
             if recipe.spec.mode != "deployment" or not heavy:
                 continue
-            head = heavy[0]
+            head = max(heavy, key=lambda role: (role.start_order, role.name == "head"))
             if head.inference_port is None:
                 continue
             node = self._db.get_node(head.node)
@@ -350,7 +366,9 @@ class FleetGateway:
         body: bytes,
     ) -> httpx.Request:
         forwarded = {
-            key.lower(): value for key, value in headers.items() if key.lower() not in _HOP_BY_HOP
+            key.lower(): value
+            for key, value in headers.items()
+            if key.lower() not in _HOP_BY_HOP and key.lower() not in _STRIP_REQUEST
         }
         content_type = forwarded.get("content-type", "").lower()
         if "application/json" in content_type and body:
@@ -417,6 +435,16 @@ class StreamProxy:
 
     async def aclose(self) -> None:
         await self._upstream.aclose()
+
+
+def filter_response_headers(headers: Mapping[str, str]) -> dict[str, str]:
+    """Drop headers that no longer describe the decoded response body."""
+
+    return {
+        key: value
+        for key, value in headers.items()
+        if key.lower() not in _HOP_BY_HOP and key.lower() not in _RESPONSE_STRIP
+    }
 
 
 def extract_usage(response: httpx.Response) -> tuple[int, int]:

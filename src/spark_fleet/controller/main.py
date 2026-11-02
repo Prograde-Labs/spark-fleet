@@ -122,6 +122,8 @@ class Controller:
     async def poll_metrics_once(self) -> dict[str, str]:
         errors: dict[str, str] = {}
         for node in self.registry.list():
+            if not node.enabled:
+                continue
             client = self.client_factory(node.agent_url, self.config.agent_token)
             try:
                 snapshot = await client.metrics()

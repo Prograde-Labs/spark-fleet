@@ -12,12 +12,12 @@ from dataclasses import asdict
 from pathlib import Path
 from typing import Any
 
-from fastapi import Depends, FastAPI, HTTPException, Request, Response
+from fastapi import Depends, FastAPI, HTTPException, Query, Request, Response
 from fastapi.responses import JSONResponse, StreamingResponse
 
 from spark_fleet.controller.agent_client import AgentClient, AgentError
 from spark_fleet.controller.deployments import DeploymentError, DeploymentManager
-from spark_fleet.controller.gateway import FleetGateway, GatewayError
+from spark_fleet.controller.gateway import FleetGateway, GatewayError, filter_response_headers
 from spark_fleet.controller.importer import (
     Importer,
     ImporterError,
@@ -38,7 +38,7 @@ from spark_fleet.shared.recipe import (
     recipe_to_yaml,
     validate_against_nodes,
 )
-from spark_fleet.shared.render import NodeAddress
+from spark_fleet.shared.render import NodeAddress, RenderError, render_deployment
 from spark_fleet.shared.security import (
     SESSION_COOKIE_NAME,
     AuthError,
@@ -96,7 +96,7 @@ def build_app(
         response.set_cookie(value=token, **session_cookie_settings())
         return {"authenticated": True}
 
-    @app.post("/api/logout")
+    @app.post("/api/logout", dependencies=[Depends(mutation_dep)])
     def logout(response: Response) -> dict[str, Any]:
         response.delete_cookie(SESSION_COOKIE_NAME, path="/")
         return {"authenticated": False}
@@ -204,7 +204,29 @@ def build_app(
     def validate_recipe(body: Mapping[str, Any]) -> dict[str, Any]:
         recipe = _parse_body(body)
         _validate_recipe(recipe, recipes_dir, exclude=recipe.metadata.name, registry=registry)
-        return {"recipe": recipe.model_dump(by_alias=True), "yaml": recipe_to_yaml(recipe)}
+        try:
+            rendered = render_deployment(
+                recipe,
+                recipe.metadata.name,
+                "preview",
+                _node_addresses(registry),
+            )
+        except RenderError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        return {
+            "recipe": recipe.model_dump(by_alias=True),
+            "yaml": recipe_to_yaml(recipe),
+            "rendered": [
+                {
+                    "role": item.role,
+                    "node": item.node,
+                    "containerName": item.container_name,
+                    "configHash": item.config_hash,
+                    "compose": item.compose,
+                }
+                for item in rendered
+            ],
+        }
 
     @app.post("/api/recipes/{name}/swap-model", dependencies=[Depends(mutation_dep)])
     def swap_model(name: str, body: Mapping[str, Any]) -> dict[str, Any]:
@@ -233,7 +255,7 @@ def build_app(
 
     @app.get("/api/deployments", dependencies=[Depends(session_dep)])
     def list_deployments() -> dict[str, Any]:
-        return {"deployments": _deployment_dicts(db)}
+        return {"deployments": _deployment_dicts(db, recipes_dir)}
 
     @app.post("/api/deployments", dependencies=[Depends(mutation_dep)])
     def create_deployment(body: Mapping[str, Any]) -> dict[str, Any]:
@@ -256,11 +278,11 @@ def build_app(
             recipe.model_dump(by_alias=True, exclude_unset=True),
             status="pending",
         )
-        return _deployment_dict(db, deployment_id)
+        return _deployment_dict(db, deployment_id, recipes_dir)
 
     @app.get("/api/deployments/{deployment_id}", dependencies=[Depends(session_dep)])
     def get_deployment(deployment_id: str) -> dict[str, Any]:
-        return _deployment_dict(db, deployment_id)
+        return _deployment_dict(db, deployment_id, recipes_dir)
 
     @app.delete("/api/deployments/{deployment_id}", dependencies=[Depends(mutation_dep)])
     def delete_deployment(deployment_id: str) -> dict[str, Any]:
@@ -269,6 +291,16 @@ def build_app(
             raise HTTPException(status_code=404, detail="deployment not found")
         if deployment["status"] == "loaded":
             raise HTTPException(status_code=409, detail="unload before deleting")
+        active = [
+            job
+            for job in db.list_jobs_by_status(("pending", "running"))
+            if job.get("deployment_id") == deployment_id
+        ]
+        if active:
+            raise HTTPException(
+                status_code=409,
+                detail="deployment has a pending or running job",
+            )
         db.delete_deployment(deployment_id)
         return {"deleted": deployment_id}
 
@@ -299,7 +331,7 @@ def build_app(
         deployment = db.get_deployment(deployment_id)
         if deployment is None:
             raise HTTPException(status_code=404, detail="deployment not found")
-        recipe = _read_recipe(recipes_dir, deployment["recipe_name"])
+        recipe = _deployment_recipe(deployment, recipes_dir)
         try:
             job_id = await deployments.redeploy(
                 deployment_id,
@@ -317,6 +349,8 @@ def build_app(
             raise HTTPException(status_code=404, detail="deployment not found")
         if deployment["status"] != "loaded":
             raise HTTPException(status_code=409, detail="deployment is not loaded")
+        if deployment["mode"] != "deployment":
+            raise HTTPException(status_code=409, detail="only deployment recipes can be primary")
         db.set_primary(deployment_id)
         return {"primary": deployment_id}
 
@@ -393,7 +427,7 @@ def build_app(
     # Jobs -----------------------------------------------------------------
 
     @app.get("/api/jobs", dependencies=[Depends(session_dep)])
-    def list_jobs(limit: int = 100) -> dict[str, Any]:
+    def list_jobs(limit: int = Query(100, ge=1, le=1000)) -> dict[str, Any]:
         return {"jobs": db.list_jobs(limit)}
 
     @app.get("/api/jobs/{job_id}", dependencies=[Depends(session_dep)])
@@ -416,7 +450,7 @@ def build_app(
         node_id: str,
         since: float | None = None,
         until: float | None = None,
-        limit: int = 1000,
+        limit: int = Query(1000, ge=1, le=10_000),
     ) -> dict[str, Any]:
         latest = metrics_store.latest_node_metrics(node_id)
         series = {
@@ -470,6 +504,13 @@ def build_app(
                 if not isinstance(node_id, str) or not isinstance(url, str):
                     raise HTTPException(status_code=400, detail="invalid source")
                 try:
+                    registry.require(node_id)
+                except NodeError as exc:
+                    raise HTTPException(status_code=404, detail=str(exc)) from exc
+                previous = clients.get(node_id)
+                if previous is not None:
+                    await previous[1].aclose()
+                try:
                     clients[node_id] = (url, OldControllerClient(url))
                 except ValueError as exc:
                     raise HTTPException(status_code=400, detail=str(exc)) from exc
@@ -498,11 +539,18 @@ def build_app(
                 if not isinstance(node_id, str) or not isinstance(url, str):
                     raise HTTPException(status_code=400, detail="invalid source")
                 try:
+                    registry.require(node_id)
+                except NodeError as exc:
+                    raise HTTPException(status_code=404, detail=str(exc)) from exc
+                previous = clients.get(node_id)
+                if previous is not None:
+                    await previous[1].aclose()
+                try:
                     clients[node_id] = (url, OldControllerClient(url))
                 except ValueError as exc:
                     raise HTTPException(status_code=400, detail=str(exc)) from exc
             plan = await Importer(_node_addresses(registry)).plan(clients)
-            created = plan.apply(db, confirm=True)
+            created = plan.apply(db, confirm=True, recipes_dir=recipes_dir)
         except ImporterError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
         finally:
@@ -514,7 +562,10 @@ def build_app(
 
     @app.get("/v1/models")
     def gateway_models() -> dict[str, Any]:
-        return gateway.models()
+        try:
+            return gateway.models()
+        except GatewayError as exc:
+            return JSONResponse({"detail": str(exc)}, status_code=exc.status_code)
 
     @app.api_route("/v1/{path:path}", methods=["POST"])
     async def gateway_proxy(path: str, request: Request) -> Response:
@@ -525,26 +576,32 @@ def build_app(
             if body:
                 try:
                     payload = json.loads(body)
+                except ValueError:
+                    payload = None
+                if isinstance(payload, dict):
                     stream_requested = bool(payload.get("stream"))
                     model = payload.get("model")
-                except ValueError:
+                else:
                     model = None
             else:
                 model = None
             if not isinstance(model, str):
                 raise HTTPException(status_code=400, detail="model is required")
+            target = f"/v1/{path}"
+            if request.url.query:
+                target = f"{target}?{request.url.query}"
             if stream_requested:
-                stream = await gateway.stream(model, request.method, f"/v1/{path}", headers, body)
+                stream = await gateway.stream(model, request.method, target, headers, body)
                 return StreamingResponse(
                     stream.aiter_bytes(),
                     status_code=stream.status_code,
-                    headers=dict(stream.headers),
+                    headers=filter_response_headers(stream.headers),
                 )
-            response = await gateway.proxy(model, request.method, f"/v1/{path}", headers, body)
+            response = await gateway.proxy(model, request.method, target, headers, body)
             return Response(
                 content=response.content,
                 status_code=response.status_code,
-                headers=dict(response.headers),
+                headers=filter_response_headers(response.headers),
             )
         except GatewayError as exc:
             headers_out = {}
@@ -600,12 +657,17 @@ def _read_recipe(recipes_dir: Path, name: str) -> Recipe:
 def _write_recipe(recipes_dir: Path, recipe: Recipe) -> None:
     recipes_dir.mkdir(parents=True, exist_ok=True)
     path = _recipe_path(recipes_dir, recipe.metadata.name)
-    with tempfile.NamedTemporaryFile(
-        mode="w", dir=recipes_dir, suffix=".tmp", delete=False, encoding="utf-8"
-    ) as handle:
-        temporary = Path(handle.name)
-        handle.write(recipe_to_yaml(recipe))
-    os.replace(temporary, path)
+    temporary: Path | None = None
+    try:
+        with tempfile.NamedTemporaryFile(
+            mode="w", dir=recipes_dir, suffix=".tmp", delete=False, encoding="utf-8"
+        ) as handle:
+            temporary = Path(handle.name)
+            handle.write(recipe_to_yaml(recipe))
+        os.replace(temporary, path)
+    finally:
+        if temporary is not None and temporary.exists():
+            temporary.unlink(missing_ok=True)
 
 
 def _parse_body(body: Mapping[str, Any]) -> Recipe:
@@ -695,21 +757,52 @@ def _diff(old: str, new: str, name: str) -> str:
     )
 
 
-def _deployment_dict(db: Database, deployment_id: str) -> dict[str, Any]:
+def _deployment_recipe(deployment: Mapping[str, Any], recipes_dir: Path) -> Recipe:
+    try:
+        return _read_recipe(recipes_dir, deployment["recipe_name"])
+    except HTTPException as exc:
+        if exc.status_code != 404:
+            raise
+    try:
+        return parse_recipe(deployment["recipe"])
+    except RecipeError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+def _deployment_dict(db: Database, deployment_id: str, recipes_dir: Path) -> dict[str, Any]:
     deployment = db.get_deployment(deployment_id)
     if deployment is None:
         raise HTTPException(status_code=404, detail="deployment not found")
     return {
         "deployment": deployment,
         "roles": db.list_roles(deployment_id),
+        "stale": _is_stale(deployment, recipes_dir),
     }
 
 
-def _deployment_dicts(db: Database) -> list[dict[str, Any]]:
+def _deployment_dicts(db: Database, recipes_dir: Path) -> list[dict[str, Any]]:
     return [
-        {"deployment": deployment, "roles": db.list_roles(deployment["id"])}
+        {
+            "deployment": deployment,
+            "roles": db.list_roles(deployment["id"]),
+            "stale": _is_stale(deployment, recipes_dir),
+        }
         for deployment in db.list_deployments()
     ]
+
+
+def _is_stale(deployment: Mapping[str, Any], recipes_dir: Path) -> bool:
+    if deployment["status"] != "loaded":
+        return False
+    path = recipes_dir / f"{deployment['recipe_name']}.yaml"
+    try:
+        recipe = parse_recipe_yaml(path.read_text(encoding="utf-8"))
+    except (OSError, RecipeError):
+        return False
+    current = recipe.model_dump(by_alias=True, exclude_unset=True)
+    return json.dumps(deployment["recipe"], sort_keys=True, default=str) != json.dumps(
+        current, sort_keys=True, default=str
+    )
 
 
 def _in_use_repos(db: Database) -> set[str]:

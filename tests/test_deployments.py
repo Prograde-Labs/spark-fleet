@@ -1288,3 +1288,105 @@ async def test_check_readiness_rejects_invalid_pattern(db, registry):
             StatusClient([]),
             "cid",
         )
+
+
+async def test_up_failure_downs_partially_created_project(db, registry, runner):
+    create_deployment(db)
+    agents = agents_for()
+    agents[NODE_01_URL].fail_up.add("spark-fleet-demo-glm-head")
+    manager = make_manager(db, registry, runner, agents)
+
+    await wait_job(db, await manager.load("dep-1"), "failed")
+
+    assert ("down", "spark-fleet-demo-glm-head") in agents[NODE_01_URL].calls
+
+
+async def test_prepare_failure_restores_displaced_deployment(db, registry, runner):
+    old_recipe = create_deployment(
+        db,
+        "dep-old",
+        "old-deploy",
+        recipe_dict(name="old-deploy", aliases=["old"], served_name="OLD"),
+    )
+    db.update_deployment("dep-old", status="loaded")
+    add_roles(db, "dep-old", old_recipe)
+    db.set_primary("dep-old")
+    create_deployment(
+        db,
+        "dep-new",
+        "new-deploy",
+        recipe_dict(
+            name="new-deploy",
+            aliases=["new"],
+            served_name="NEW",
+            prepare=[
+                {
+                    "name": "stage",
+                    "node": "spark-02",
+                    "image": "alpine:latest",
+                    "command": ["false"],
+                }
+            ],
+        ),
+    )
+    agents = agents_for()
+    agents[NODE_02_URL].prepare_status = {"state": "failed", "error": "prepare boom"}
+    manager = make_manager(db, registry, runner, agents, policy="restore")
+
+    await wait_job(db, await manager.load("dep-new"), "failed")
+
+    assert db.get_deployment("dep-new")["status"] == "failed"
+    assert db.get_deployment("dep-old")["status"] == "loaded"
+    assert db.get_deployment("dep-old")["is_primary"] is True
+    assert ("up", "spark-fleet-old-deploy-head") in agents[NODE_01_URL].calls
+
+
+async def test_unload_failure_clears_primary(db, registry, runner):
+    recipe_obj = create_deployment(db, status="loaded")
+    add_roles(db, "dep-1", recipe_obj)
+    db.set_primary("dep-1")
+    agents = agents_for()
+    agents[NODE_01_URL].fail_down.add("spark-fleet-demo-glm-head")
+    manager = make_manager(db, registry, runner, agents)
+
+    await wait_job(db, await manager.unload("dep-1"), "failed")
+
+    deployment = db.get_deployment("dep-1")
+    assert deployment["status"] == "failed"
+    assert deployment["is_primary"] is False
+
+
+async def test_failed_primary_does_not_block_auto_promotion(db, registry, runner):
+    old_recipe = create_deployment(db, "dep-old", "old-deploy")
+    db.update_deployment("dep-old", status="failed")
+    add_roles(db, "dep-old", old_recipe)
+    db.set_primary("dep-old")
+    create_deployment(db, "dep-new", "new-deploy")
+    manager = make_manager(db, registry, runner, agents_for())
+
+    await wait_job(db, await manager.load("dep-new"), "succeeded")
+
+    assert db.get_deployment("dep-new")["is_primary"] is True
+    assert db.get_deployment("dep-old")["is_primary"] is False
+
+
+async def test_service_recipe_cannot_be_primary(db, registry, runner):
+    create_deployment(
+        db,
+        recipe=recipe_dict(
+            mode="service",
+            model=False,
+            roles=[
+                {
+                    "name": "light",
+                    "node": "spark-01",
+                    "class": "light",
+                    "service": {"image": "img"},
+                }
+            ],
+        ),
+    )
+    manager = make_manager(db, registry, runner, agents_for())
+
+    with pytest.raises(DeploymentError, match="only deployment recipes can be primary"):
+        await manager.load("dep-1", primary=True)

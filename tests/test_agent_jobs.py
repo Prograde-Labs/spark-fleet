@@ -448,3 +448,52 @@ def test_pull_image_wraps_docker_errors(monkeypatch):
 
     with pytest.raises(JobError, match="pull failed"):
         pull_image("alpine:latest")
+
+
+def test_manager_status_omits_logs_while_running(monkeypatch):
+    process = FakeProcess(exit_code=0, logs="lots of output\n")
+    patch_popen(monkeypatch, process)
+    manager = JobManager()
+    manager.start("stage", "alpine:latest", ["true"], labels=LABELS)
+
+    snapshot = manager.status("stage")
+
+    assert snapshot["state"] == "running"
+    assert snapshot["logs"] == ""
+
+
+def test_manager_status_and_list_after_completion(monkeypatch):
+    process = FakeProcess(exit_code=0, logs="done\n")
+    patch_popen(monkeypatch, process)
+    manager = JobManager()
+    manager.start("stage", "alpine:latest", ["true"], labels=LABELS)
+    manager.wait("stage")
+
+    # ``wait`` removes the job, so status is unknown afterwards.
+    with pytest.raises(JobError, match="unknown job"):
+        manager.status("stage")
+
+
+def test_manager_status_reports_failure_and_logs(monkeypatch):
+    process = FakeProcess(exit_code=1, logs="boom\n")
+    process.returncode = 1
+    patch_popen(monkeypatch, process)
+    manager = JobManager()
+    manager.start("stage", "alpine:latest", ["false"], labels=LABELS)
+
+    snapshot = manager.status("stage")
+
+    assert snapshot["state"] == "failed"
+    assert snapshot["exit_code"] == 1
+    assert snapshot["logs"] == "boom\n"
+
+
+def test_manager_caps_captured_logs(monkeypatch):
+    process = FakeProcess(exit_code=0, logs="x" * 1_100_000)
+    patch_popen(monkeypatch, process)
+    manager = JobManager()
+    manager.start("stage", "alpine:latest", ["true"], labels=LABELS)
+
+    result = manager.wait("stage")
+
+    assert len(result.logs) <= 1_000_000

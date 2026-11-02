@@ -7,6 +7,7 @@ import yaml
 from spark_fleet.controller.importer import (
     Importer,
     ImporterError,
+    ImportPlan,
     OldControllerClient,
     SkippedWorkload,
 )
@@ -165,7 +166,7 @@ async def test_plan_groups_distributed_workloads():
     assert roles[0].readiness.type == "http"
     assert roles[1].readiness.type == "running"
     assert proposal.recipe.spec.topology.master_port == 25000
-    assert proposal.recipe.spec.model.served_name == "glm-53"
+    assert proposal.recipe.spec.model.served_name == "Demo-Model-B"
     head_service = roles[0].service.model_dump(exclude_unset=True)
     assert head_service["environment"]["MASTER_ADDR"] == "{{ node.spark-01.fabricIp }}"
     assert "---" in proposal.diff
@@ -333,3 +334,94 @@ async def test_plan_skips_invalid_recipes():
 
     assert plan.proposals == ()
     assert plan.skipped
+
+
+async def test_apply_writes_recipe_files(tmp_path):
+    sources = fake_sources([workload("demo-glm-head")], {"demo-glm-head": instance_yaml()})
+    plan = await Importer(NODES).plan(sources)
+    db = Database(tmp_path / "fleet.db")
+    recipes = tmp_path / "recipes"
+
+    created = plan.apply(db, confirm=True, recipes_dir=recipes)
+
+    assert len(created) == 1
+    assert recipes.joinpath("demo-glm.yaml").is_file()
+    assert "servedName: Demo-Model-B" in recipes.joinpath("demo-glm.yaml").read_text()
+
+
+async def test_apply_rejects_duplicate_plan_names(tmp_path):
+    sources = fake_sources([workload("demo-glm-head")], {"demo-glm-head": instance_yaml()})
+    plan = await Importer(NODES).plan(sources)
+    duplicate = ImportPlan((plan.proposals[0], plan.proposals[0]), ())
+    db = Database(tmp_path / "fleet.db")
+
+    with pytest.raises(ImporterError, match="duplicate recipe names"):
+        duplicate.apply(db, confirm=True)
+
+
+async def test_plan_preserves_served_model_case_and_dots():
+    sources = fake_sources(
+        [workload("demo-glm-head")],
+        {"demo-glm-head": instance_yaml(served_model="Demo-Model-B")},
+    )
+
+    plan = await Importer(NODES).plan(sources)
+
+    assert plan.proposals[0].recipe.spec.model.served_name == "Demo-Model-B"
+
+
+async def test_plan_uses_running_readiness_when_head_has_no_port():
+    sources = fake_sources(
+        [workload("train-head", inference_port=None)],
+        {"train-head": instance_yaml(name="train-head", inference_port=None)},
+    )
+
+    plan = await Importer(NODES).plan(sources)
+
+    assert plan.proposals[0].recipe.spec.roles[0].readiness.type == "running"
+
+
+async def test_plan_sanitizes_folded_prepare_fields():
+    helper_config = yaml.safe_dump(
+        {
+            "x-class": "light",
+            "services": {
+                "workload": {
+                    "image": "pull:tag",
+                    "environment": ["A=1", "B=2"],
+                    "volumes": ["/data:/data", {"type": "bind", "source": "/x"}],
+                    "command": ["pull"],
+                }
+            },
+        },
+        sort_keys=False,
+    )
+    sources = fake_sources(
+        [workload("demo-glm-head"), workload("demo-glm-pull-helper", "light", None, ())],
+        {"demo-glm-head": instance_yaml(name="demo-glm-head"), "demo-glm-pull-helper": helper_config},
+    )
+
+    plan = await Importer(NODES).plan(sources)
+
+    prepare = plan.proposals[0].recipe.spec.prepare[0]
+    assert prepare.environment == {"A": "1", "B": "2"}
+    assert prepare.volumes == ["/data:/data"]
+
+
+async def test_plan_reports_unreadable_instances():
+    class FailingController(FakeController):
+        async def instance(self, name):
+            raise ImporterError("instance unavailable")
+
+    sources = {
+        "spark-01": (
+            "http://old-01:8091",
+            FailingController([workload("demo-glm-head")], {}),
+        )
+    }
+
+    plan = await Importer(NODES).plan(sources)
+
+    assert plan.proposals == ()
+    assert plan.skipped[0].name == "demo-glm-head"
+    assert "could not read instance" in plan.skipped[0].reason

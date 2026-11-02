@@ -328,7 +328,8 @@ def test_login_sets_cookie_and_requires_csrf(secured_env):
     assert allowed.status_code == 200
     assert secured_env.db.list_settings() == {"theme": "dark"}
 
-    client.post("/api/logout")
+    assert client.post("/api/logout").status_code == 403
+    client.post("/api/logout", headers={"X-CSRF-Token": session.csrf})
     assert client.get("/api/session").json() == {"enabled": True, "authenticated": False}
 
 
@@ -839,6 +840,8 @@ def test_import_plan_and_apply(env, monkeypatch):
 
 
 def test_import_rejects_invalid_source(env):
+    add_node(env.client)
+
     response = env.client.post(
         "/api/import/plan",
         json={"sources": [{"nodeId": "spark-01", "url": "ftp://old:8091"}]},
@@ -846,6 +849,12 @@ def test_import_rejects_invalid_source(env):
 
     assert response.status_code == 400
     assert "invalid controller URL" in response.json()["detail"]
+
+    unknown = env.client.post(
+        "/api/import/plan",
+        json={"sources": [{"nodeId": "nope", "url": "http://old:8091"}]},
+    )
+    assert unknown.status_code == 404
 
 
 # Gateway ------------------------------------------------------------------
@@ -933,3 +942,112 @@ def test_events_streams_frames(env, monkeypatch):
         assert response.status_code == 200
         assert response.headers["content-type"].startswith("text/event-stream")
         assert b"event: ping" in response.read()
+
+
+def test_validate_recipe_returns_rendered_compose(env):
+    add_node(env.client)
+
+    response = env.client.post("/api/recipes/validate", json={"yaml": RECIPE_YAML})
+
+    assert response.status_code == 200
+    rendered = response.json()["rendered"]
+    assert rendered[0]["role"] == "head"
+    assert rendered[0]["node"] == "spark-01"
+    assert rendered[0]["compose"]["services"]["workload"]["image"] == "vllm:tag"
+    assert rendered[0]["configHash"]
+
+
+def test_deployment_list_includes_stale_flag(env):
+    add_node(env.client)
+    add_recipe(env, "glm")
+    add_deployment(env.db, status="loaded")
+    changed = RECIPE_YAML.replace("servedName: GLM", "servedName: CHANGED")
+    env.recipes_dir.joinpath("glm.yaml").write_text(changed)
+
+    listed = env.client.get("/api/deployments").json()["deployments"]
+
+    assert listed[0]["stale"] is True
+
+
+def test_delete_deployment_with_active_job_is_409(env):
+    add_deployment(env.db, status="pending")
+    env.db.create_job("job-1", "deployment.load", deployment_id="dep-1", status="running")
+
+    response = env.client.delete("/api/deployments/dep-1")
+
+    assert response.status_code == 409
+    assert "pending or running job" in response.json()["detail"]
+
+
+def test_redeploy_falls_back_to_stored_recipe(env):
+    add_node(env.client)
+    add_recipe(env, "glm")
+    add_deployment(env.db)
+    env.recipes_dir.joinpath("glm.yaml").unlink()
+
+    response = env.client.post("/api/deployments/dep-1/redeploy")
+
+    assert response.status_code == 200
+    assert env.deployments.calls[-1][3].metadata.name == "glm"
+
+
+def test_gateway_rejects_non_object_json_body(env):
+    add_node(env.client)
+    add_deployment(env.db, status="loaded")
+
+    response = env.client.post("/v1/chat/completions", json=[])
+
+    assert response.status_code == 400
+    assert response.json()["detail"] == "model is required"
+
+
+def test_gateway_forwards_query_string(env):
+    add_node(env.client)
+    add_deployment(env.db, status="loaded")
+    seen = {}
+
+    def handler(request):
+        seen["query"] = request.url.query
+        return httpx.Response(200, json={"ok": True})
+
+    STATE["gateway_handler"] = handler
+
+    response = env.client.post("/v1/chat/completions?foo=bar&n=2", json={"model": "glm"})
+
+    assert response.status_code == 200
+    assert seen["query"] == b"foo=bar&n=2"
+
+
+def test_gateway_models_reports_duplicate_alias_as_409(env):
+    add_node(env.client)
+    add_deployment(env.db, status="loaded")
+    duplicate = {
+        "apiVersion": "spark-fleet/v1",
+        "kind": "Recipe",
+        "metadata": {"name": "two"},
+        "spec": {
+            "mode": "deployment",
+            "runtime": "custom",
+            "model": {"repo": "org/two", "servedName": "TWO"},
+            "gateway": {"aliases": ["glm"]},
+            "roles": [
+                {
+                    "name": "head",
+                    "node": "spark-01",
+                    "class": "heavy",
+                    "inferencePort": 8899,
+                    "service": {"image": "img"},
+                }
+            ],
+        },
+    }
+    env.db.create_deployment("dep-2", "two", "two", "deployment", duplicate, status="loaded")
+
+    response = env.client.get("/v1/models")
+
+    assert response.status_code == 409
+    assert "duplicate alias" in response.json()["detail"]
+
+
+def test_invalid_limit_is_rejected(env):
+    assert env.client.get("/api/jobs", params={"limit": 0}).status_code == 422

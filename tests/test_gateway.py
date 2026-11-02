@@ -13,6 +13,7 @@ from spark_fleet.controller.gateway import (
     ModelLoading,
     ModelNotFound,
     extract_usage,
+    filter_response_headers,
     parse_sse_usage,
     usage_from_payload,
 )
@@ -360,3 +361,95 @@ async def test_gateway_close(db):
     assert gateway._client.is_closed is False
     await gateway.aclose()
     assert gateway._client.is_closed is True
+
+
+def test_routing_prefers_head_role_by_start_order(db):
+    add_node(db, "spark-01", "192.0.2.239")
+    add_node(db, "spark-02", "192.0.2.79")
+    recipe_doc = {
+        "apiVersion": "spark-fleet/v1",
+        "kind": "Recipe",
+        "metadata": {"name": "multi"},
+        "spec": {
+            "mode": "deployment",
+            "runtime": "custom",
+            "model": {"repo": "org/model", "servedName": "MULTI"},
+            "gateway": {"aliases": ["multi"]},
+            "roles": [
+                {
+                    "name": "worker",
+                    "node": "spark-02",
+                    "class": "heavy",
+                    "startOrder": 10,
+                    "service": {"image": "img"},
+                },
+                {
+                    "name": "head",
+                    "node": "spark-01",
+                    "class": "heavy",
+                    "startOrder": 20,
+                    "inferencePort": 8888,
+                    "service": {"image": "img"},
+                },
+            ],
+        },
+    }
+    db.create_deployment("dep-1", "multi", "multi", "deployment", recipe_doc, status="loaded")
+    gateway = FleetGateway(db)
+
+    route = gateway.resolve("multi")
+
+    assert route.upstream_url == "http://192.0.2.239:8888"
+
+
+def test_flush_drops_samples_for_deleted_deployments(db):
+    add_deployment(db)
+    store = MetricsStore(db)
+    counters = InferenceCounters()
+    counters.record("dep-1", status_code=200, latency_ms=1.0)
+    db.delete_deployment("dep-1")
+
+    counters.flush(store, ts=1.0)
+
+    assert counters.snapshot() == {}
+    assert store.inference_series("dep-1") == []
+
+
+async def test_proxy_strips_credentials_from_upstream(db):
+    add_deployment(db)
+    calls = []
+
+    def handler(request):
+        calls.append(request)
+        return httpx.Response(200, json={"ok": True})
+
+    gateway = FleetGateway(db, transport=httpx.MockTransport(handler))
+
+    await gateway.proxy(
+        "demo-glm",
+        "POST",
+        "/v1/chat/completions",
+        {
+            "Content-Type": "application/json",
+            "Authorization": "Bearer secret",
+            "Cookie": "spark_fleet_session=abc",
+            "X-CSRF-Token": "csrf",
+        },
+        b"{}",
+    )
+
+    assert "authorization" not in calls[0].headers
+    assert "cookie" not in calls[0].headers
+    assert "x-csrf-token" not in calls[0].headers
+
+
+def test_filter_response_headers_drops_stale_encoding_headers():
+    assert filter_response_headers(
+        {
+            "content-length": "10",
+            "content-encoding": "gzip",
+            "connection": "keep-alive",
+            "content-type": "application/json",
+            "x-upstream": "1",
+        }
+    ) == {"content-type": "application/json", "x-upstream": "1"}
