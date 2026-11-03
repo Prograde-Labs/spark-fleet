@@ -205,10 +205,16 @@ async def test_models_reports_explicit_recipe_context_length(db):
         primary=True,
         context_length=524288,
     )
+    calls = []
 
-    async with FleetGateway(db) as gateway:
+    def handler(request):
+        calls.append(str(request.url))
+        return httpx.Response(200, json={"object": "list", "data": []})
+
+    async with FleetGateway(db, transport=httpx.MockTransport(handler)) as gateway:
         body = await gateway.models()
 
+    assert calls == []
     assert [item["id"] for item in body["data"]] == ["ONE", "one", "spark-active"]
     for item in body["data"]:
         assert item["max_model_len"] == 524288
@@ -418,7 +424,7 @@ async def test_models_ignores_non_mapping_upstream_entries(db):
     assert {item["max_model_len"] for item in body["data"]} == {4096}
 
 
-async def test_models_caches_upstream_context_lookups(db, monkeypatch):
+async def test_models_caches_upstream_context_lookups(db):
     add_deployment(db)
     calls = []
 
@@ -451,15 +457,89 @@ async def test_models_cache_expires(db, monkeypatch):
 
     import spark_fleet.controller.gateway as gateway_module
 
-    monkeypatch.setattr(gateway_module, "UPSTREAM_CONTEXT_CACHE_TTL_SECONDS", 0.0)
+    async with FleetGateway(db, transport=httpx.MockTransport(handler)) as gateway:
+        monkeypatch.setattr(gateway_module, "UPSTREAM_CONTEXT_CACHE_TTL_SECONDS", 0.0)
+        first = await gateway.models()
+        second = await gateway.models()
+        monkeypatch.setattr(gateway_module, "UPSTREAM_CONTEXT_CACHE_TTL_SECONDS", 60.0)
+        third = await gateway.models()
+
+    assert len(calls) == 2
+    assert {item["max_model_len"] for item in first["data"]} == {262144}
+    assert {item["max_model_len"] for item in second["data"]} == {262144}
+    assert {item["max_model_len"] for item in third["data"]} == {262144}
+
+
+async def test_models_retries_upstream_after_a_failed_lookup(db, monkeypatch):
+    add_deployment(db)
+    calls = []
+    responses = [
+        httpx.Response(500, text="boom"),
+        httpx.Response(
+            200,
+            json={"object": "list", "data": [{"id": "Demo-Model-B", "max_model_len": 262144}]},
+        ),
+    ]
+
+    def handler(request):
+        calls.append(str(request.url))
+        return responses.pop(0)
+
+    import spark_fleet.controller.gateway as gateway_module
+
+    monkeypatch.setattr(gateway_module, "UPSTREAM_CONTEXT_NEGATIVE_TTL_SECONDS", 0.0)
 
     async with FleetGateway(db, transport=httpx.MockTransport(handler)) as gateway:
         first = await gateway.models()
         second = await gateway.models()
 
     assert len(calls) == 2
-    assert {item["max_model_len"] for item in first["data"]} == {262144}
+    for item in first["data"]:
+        assert "max_model_len" not in item
     assert {item["max_model_len"] for item in second["data"]} == {262144}
+
+
+async def test_models_prunes_stale_context_cache(db):
+    add_deployment(db)
+    calls = []
+
+    def handler(request):
+        calls.append(str(request.url))
+        return httpx.Response(
+            200,
+            json={"object": "list", "data": [{"id": "Demo-Model-B", "max_model_len": 262144}]},
+        )
+
+    async with FleetGateway(db, transport=httpx.MockTransport(handler)) as gateway:
+        await gateway.models()
+        assert gateway._context_cache
+        db.delete_deployment("dep-1")
+        body = await gateway.models()
+
+    assert body["data"] == []
+    assert gateway._context_cache == {}
+
+
+async def test_models_handles_invalid_upstream_url(db):
+    async with FleetGateway(db) as gateway:
+        assert await gateway._fetch_upstream_context("http://::1:8888", "X") is None
+
+
+async def test_models_brackets_ipv6_upstream_url(db):
+    add_node(db, "spark-v6", "fd00::1")
+    db.create_deployment(
+        "dep-v6",
+        "v6",
+        "v6",
+        "deployment",
+        recipe("v6", "spark-v6", "V6"),
+        status="loaded",
+    )
+
+    async with FleetGateway(db) as gateway:
+        route = gateway.resolve("V6")
+
+    assert route.upstream_url == "http://[fd00::1]:8888"
 
 
 async def test_proxy_rewrites_model_and_records_usage(db):

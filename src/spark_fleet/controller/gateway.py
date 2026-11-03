@@ -32,6 +32,7 @@ from spark_fleet.shared.recipe import RecipeError, parse_recipe
 LOADING_STATUSES = frozenset({"pending", "loading", "starting"})
 UPSTREAM_CONTEXT_TIMEOUT_SECONDS = 2.0
 UPSTREAM_CONTEXT_CACHE_TTL_SECONDS = 30.0
+UPSTREAM_CONTEXT_NEGATIVE_TTL_SECONDS = 5.0
 _STRIP_REQUEST = frozenset(
     {
         "authorization",
@@ -84,6 +85,12 @@ class ModelLoading(GatewayError):
 class GatewayUnavailable(GatewayError):
     def __init__(self, message: str):
         super().__init__(message, status_code=503)
+
+
+def _upstream_url(host: str, port: int) -> str:
+    if ":" in host and not host.startswith("["):
+        host = f"[{host}]"
+    return f"http://{host}:{port}"
 
 
 @dataclass(frozen=True)
@@ -242,7 +249,7 @@ class FleetGateway:
                 deployment_name=deployment["name"],
                 served_name=served_name or deployment["name"],
                 aliases=frozenset(aliases),
-                upstream_url=f"http://{node['lan_ip']}:{head.inference_port}",
+                upstream_url=_upstream_url(node["lan_ip"], head.inference_port),
                 status="loaded" if status == "loaded" else "loading",
                 context_length=(
                     recipe.spec.model.context_length if recipe.spec.model else None
@@ -329,6 +336,9 @@ class FleetGateway:
             }
         )
         if not keys:
+            for key in list(self._context_cache):
+                if key not in keys:
+                    del self._context_cache[key]
             return {}
         for key in list(self._context_cache):
             if key not in keys:
@@ -338,10 +348,17 @@ class FleetGateway:
         pending: list[tuple[str, str]] = []
         for key in keys:
             cached = self._context_cache.get(key)
-            if cached is not None and now - cached[0] < UPSTREAM_CONTEXT_CACHE_TTL_SECONDS:
-                results[key] = cached[1]
-            else:
-                pending.append(key)
+            if cached is not None:
+                ttl = (
+                    UPSTREAM_CONTEXT_CACHE_TTL_SECONDS
+                    if cached[1] is not None
+                    else UPSTREAM_CONTEXT_NEGATIVE_TTL_SECONDS
+                )
+                if now - cached[0] < ttl:
+                    if cached[1] is not None:
+                        results[key] = cached[1]
+                    continue
+            pending.append(key)
         if not pending:
             return results
         fetched = await asyncio.gather(
@@ -351,8 +368,8 @@ class FleetGateway:
             )
         )
         for key, value in zip(pending, fetched):
+            self._context_cache[key] = (now, value)
             if value is not None:
-                self._context_cache[key] = (now, value)
                 results[key] = value
         return results
 
