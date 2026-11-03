@@ -18,6 +18,8 @@ def test_dockerfile_builds_web_wheel_controller_and_agent():
         assert stage in text
     assert "spark-fleet-controller" in text
     assert "spark-fleet-agent" in text
+    assert "controller-entrypoint.sh" in text
+    assert "gosu sparkfleet" in (ROOT / "docker" / "controller-entrypoint.sh").read_text()
     assert "HEALTHCHECK" in text
     assert "docker-${DOCKER_CLI_VERSION}.tgz" in text
     assert "docker-compose-linux-${ARCH}" in text
@@ -32,6 +34,8 @@ def test_controller_compose_is_host_network_without_docker_socket():
     assert service["network_mode"] == "host"
     assert service["build"]["target"] == "controller"
     assert "healthcheck" in service
+    assert service["cap_drop"] == ["ALL"]
+    assert "no-new-privileges:true" in service["security_opt"]
     volumes = service.get("volumes", [])
     assert not any("docker.sock" in volume for volume in volumes)
     environment = service["environment"]
@@ -50,6 +54,8 @@ def test_agent_compose_has_narrow_mounts_and_no_extra_privileges():
     assert service["network_mode"] == "host"
     assert service["build"]["target"] == "agent"
     assert "healthcheck" in service
+    assert service["cap_drop"] == ["ALL"]
+    assert "no-new-privileges:true" in service["security_opt"]
     volumes = service.get("volumes", [])
     assert "/var/run/docker.sock:/var/run/docker.sock" in volumes
     assert any("/var/lib/spark-fleet-agent" in volume for volume in volumes)
@@ -61,7 +67,6 @@ def test_agent_compose_has_narrow_mounts_and_no_extra_privileges():
         "ipc",
         "devices",
         "cap_add",
-        "security_opt",
         "userns_mode",
     }
     assert forbidden.isdisjoint(service)

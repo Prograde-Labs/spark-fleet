@@ -8,6 +8,10 @@ services:
     image: spark-fleet-controller:local
     network_mode: host
     restart: unless-stopped
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
     env_file:
       - path: .env
         required: false

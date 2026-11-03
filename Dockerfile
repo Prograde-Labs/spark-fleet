@@ -27,16 +27,21 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     SPARK_FLEET_WEB_DIST=/app/web
 WORKDIR /app
 COPY --from=python-build /dist/*.whl /tmp/
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends gosu \
+    && rm -rf /var/lib/apt/lists/*
 RUN pip install --no-cache-dir /tmp/*.whl && rm -rf /tmp/*.whl
 COPY --from=web /app/web/dist /app/web
 RUN useradd --uid 10001 --create-home sparkfleet \
     && mkdir -p /var/lib/spark-fleet \
     && chown -R sparkfleet:sparkfleet /var/lib/spark-fleet /app
-USER sparkfleet
+COPY docker/controller-entrypoint.sh /usr/local/bin/controller-entrypoint.sh
+RUN chmod +x /usr/local/bin/controller-entrypoint.sh
 EXPOSE 8091
 HEALTHCHECK --interval=20s --timeout=5s --start-period=20s --retries=3 \
     CMD python -c "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8091/health', timeout=3)"
-ENTRYPOINT ["spark-fleet-controller"]
+ENTRYPOINT ["/usr/local/bin/controller-entrypoint.sh"]
+CMD ["spark-fleet-controller"]
 
 # --- Agent -----------------------------------------------------------------
 FROM python:${PYTHON_VERSION}-slim AS agent

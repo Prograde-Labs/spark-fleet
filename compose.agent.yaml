@@ -8,6 +8,10 @@ services:
     image: spark-fleet-agent:local
     network_mode: host
     restart: unless-stopped
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
     environment:
       SPARK_FLEET_AGENT_HOST: ${SPARK_FLEET_AGENT_HOST:-0.0.0.0}
       SPARK_FLEET_AGENT_PORT: ${SPARK_FLEET_AGENT_PORT:-8092}
