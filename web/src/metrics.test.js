@@ -3,7 +3,10 @@ import test from 'node:test'
 
 import {
   cacheAggregate,
+  cacheCaption,
   cacheCapacityKnown,
+  cacheHeadline,
+  cacheKnown,
   cachePercent,
   gpuMemoryKnown,
   gpuResident,
@@ -32,6 +35,15 @@ test('cacheCapacityKnown ignores zero and missing totals', () => {
   assert.equal(cacheCapacityKnown({}), false)
 })
 
+test('cacheKnown requires capacity and free space', () => {
+  assert.equal(cacheKnown({ cache_total_bytes: 1000, cache_free_bytes: 250 }), true)
+  assert.equal(cacheKnown({ cache_total_bytes: 1000, cache_free_bytes: 0 }), true)
+  assert.equal(cacheKnown({ cache_total_bytes: 1000 }), false)
+  assert.equal(cacheKnown({ cache_total_bytes: 1000, cache_free_bytes: null }), false)
+  assert.equal(cacheKnown({ cache_total_bytes: 0, cache_free_bytes: 0 }), false)
+  assert.equal(cacheKnown({}), false)
+})
+
 test('cachePercent scales cache bytes to filesystem capacity', () => {
   assert.equal(cachePercent({ cache_bytes: 250, cache_total_bytes: 1000 }), 25)
   assert.equal(cachePercent({ cache_bytes: 2000, cache_total_bytes: 1000 }), 100)
@@ -49,13 +61,29 @@ test('cacheAggregate includes capacity from a node without cache bytes', () => {
     capacity: 5000,
     free: 1250,
     complete: false,
+    reported: 1,
   })
 })
 
-test('cacheAggregate is incomplete for an empty node entry', () => {
+test('cacheAggregate ignores a node with no cache telemetry', () => {
   const aggregate = cacheAggregate({
     a: { cache_bytes: 10, cache_total_bytes: 1000, cache_free_bytes: 250 },
-    b: {},
+    b: { host_total_bytes: 8000 },
+  })
+
+  assert.deepEqual(aggregate, {
+    used: 10,
+    capacity: 1000,
+    free: 250,
+    complete: true,
+    reported: 1,
+  })
+})
+
+test('cacheAggregate is incomplete when a node fetch failed', () => {
+  const aggregate = cacheAggregate({
+    a: { cache_bytes: 10, cache_total_bytes: 1000, cache_free_bytes: 250 },
+    b: { fetchFailed: true },
   })
 
   assert.deepEqual(aggregate, {
@@ -63,6 +91,7 @@ test('cacheAggregate is incomplete for an empty node entry', () => {
     capacity: 1000,
     free: 250,
     complete: false,
+    reported: 1,
   })
 })
 
@@ -77,6 +106,7 @@ test('cacheAggregate includes a zero-byte contributor with capacity', () => {
     capacity: 5000,
     free: 1250,
     complete: true,
+    reported: 2,
   })
 })
 
@@ -91,6 +121,7 @@ test('cacheAggregate sums multiple complete contributors', () => {
     capacity: 5000,
     free: 1250,
     complete: true,
+    reported: 2,
   })
 })
 
@@ -102,6 +133,7 @@ test('cacheAggregate treats a zero-byte contributor without capacity as incomple
 
   assert.equal(aggregate.complete, false)
   assert.equal(aggregate.used, 10)
+  assert.equal(aggregate.reported, 2)
 })
 
 test('cacheAggregate is incomplete when a contributor lacks capacity', () => {
@@ -137,6 +169,7 @@ test('cacheAggregate with no nodes is empty and incomplete', () => {
     capacity: 0,
     free: 0,
     complete: false,
+    reported: 0,
   })
 })
 
@@ -146,6 +179,7 @@ test('cacheAggregate without an argument is empty and incomplete', () => {
     capacity: 0,
     free: 0,
     complete: false,
+    reported: 0,
   })
 })
 
@@ -160,6 +194,7 @@ test('cacheAggregate ignores null node entries', () => {
     capacity: 1000,
     free: 250,
     complete: true,
+    reported: 1,
   })
 })
 
@@ -174,7 +209,38 @@ test('cacheAggregate sums a free-only node without completing', () => {
     capacity: 1000,
     free: 750,
     complete: false,
+    reported: 1,
   })
+})
+
+test('cacheHeadline hides a zero-byte aggregate that was never reported', () => {
+  assert.equal(cacheHeadline(cacheAggregate({})), null)
+  assert.equal(
+    cacheHeadline(cacheAggregate({ a: { cache_bytes: 0, cache_total_bytes: 0 } })),
+    0,
+  )
+  assert.equal(
+    cacheHeadline(
+      cacheAggregate({ a: { cache_bytes: 10, cache_total_bytes: 1000, cache_free_bytes: 250 } }),
+    ),
+    10,
+  )
+})
+
+test('cacheCaption distinguishes complete, partial, and unavailable', () => {
+  assert.equal(cacheCaption(cacheAggregate({})), 'unavailable')
+  assert.equal(
+    cacheCaption(
+      cacheAggregate({ a: { cache_bytes: 10, cache_total_bytes: 1000, cache_free_bytes: 250 } }),
+    ),
+    'complete',
+  )
+  assert.equal(
+    cacheCaption(
+      cacheAggregate({ a: { cache_bytes: 10, cache_total_bytes: 1000 } }),
+    ),
+    'partial',
+  )
 })
 
 test('groupGpus sorts by index and groups fields', () => {

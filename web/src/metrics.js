@@ -28,6 +28,22 @@ export function cachePercent(metrics) {
 
 const reported = (value) => value !== null && value !== undefined
 
+export function cacheKnown(metrics) {
+  return (
+    Number(metrics.cache_total_bytes || 0) > 0 &&
+    reported(metrics.cache_free_bytes)
+  )
+}
+
+export function cacheHeadline(aggregate) {
+  return aggregate.reported > 0 ? aggregate.used : null
+}
+
+export function cacheCaption(aggregate) {
+  if (aggregate.reported === 0) return 'unavailable'
+  return aggregate.complete ? 'complete' : 'partial'
+}
+
 export function groupGpus(metrics) {
   const groups = new Map()
   for (const [key, value] of Object.entries(metrics || {})) {
@@ -42,6 +58,13 @@ export function groupGpus(metrics) {
 
 export function cacheAggregate(metricsByNode) {
   const entries = Object.values(metricsByNode || {}).filter(Boolean)
+  const hasCacheFields = (metrics) =>
+    reported(metrics.cache_bytes) ||
+    reported(metrics.cache_total_bytes) ||
+    reported(metrics.cache_free_bytes)
+  const reportedNodes = entries.filter((metrics) =>
+    reported(metrics.cache_bytes),
+  ).length
   const used = entries.reduce(
     (sum, metrics) =>
       reported(metrics.cache_bytes) ? sum + Number(metrics.cache_bytes) : sum,
@@ -62,13 +85,16 @@ export function cacheAggregate(metricsByNode) {
     0,
   )
   const complete =
-    entries.length > 0 &&
-    entries.every(
-      (metrics) =>
+    reportedNodes > 0 &&
+    entries.every((metrics) => {
+      if (metrics.fetchFailed) return false
+      if (!hasCacheFields(metrics)) return true
+      return (
         reported(metrics.cache_bytes) &&
         reported(metrics.cache_total_bytes) &&
         Number(metrics.cache_total_bytes) > 0 &&
-        reported(metrics.cache_free_bytes),
-    )
-  return { used, capacity, free, complete }
+        reported(metrics.cache_free_bytes)
+      )
+    })
+  return { used, capacity, free, complete, reported: reportedNodes }
 }

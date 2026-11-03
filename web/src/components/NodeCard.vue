@@ -13,7 +13,7 @@ import {
 } from 'lucide-vue-next'
 import { formatBytes, formatPercent, formatRelative } from '../format'
 import {
-  cacheCapacityKnown,
+  cacheKnown as metricsCacheKnown,
   cachePercent,
   gpuMemoryKnown,
   gpuResident,
@@ -43,12 +43,7 @@ const ringOffset = computed(
 )
 const cacheTotal = computed(() => props.metrics.cache_total_bytes)
 const cacheFree = computed(() => props.metrics.cache_free_bytes)
-const cacheKnown = computed(
-  () =>
-    cacheCapacityKnown(props.metrics) &&
-    cacheFree.value !== null &&
-    cacheFree.value !== undefined,
-)
+const cacheKnown = computed(() => metricsCacheKnown(props.metrics))
 const cacheBarPercent = computed(() => cachePercent(props.metrics))
 const containerPercent = computed(() =>
   total.value > 0

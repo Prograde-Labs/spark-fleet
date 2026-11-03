@@ -21,7 +21,7 @@ import {
   statusTone,
 } from '../format'
 import { eventState } from '../stores/events'
-import { cacheAggregate } from '../metrics'
+import { cacheAggregate, cacheCaption, cacheHeadline } from '../metrics'
 import NodeCard from '../components/NodeCard.vue'
 import Topology from '../components/Topology.vue'
 
@@ -84,7 +84,10 @@ async function loadMetrics() {
         const response = await api.metrics.node(node.id, { limit: 1 })
         return [node.id, response.latest || {}]
       } catch {
-        return [node.id, metricsByNode.value[node.id] || {}]
+        return [
+          node.id,
+          { ...(metricsByNode.value[node.id] || {}), fetchFailed: true },
+        ]
       }
     }),
   )
@@ -214,12 +217,12 @@ onBeforeUnmount(() => {
           <p class="hud-label">Model cache</p>
           <Database class="h-4 w-4 text-warning" />
         </div>
-        <p class="stat-value mt-2">{{ formatBytes(cacheTotals.used) }}</p>
+        <p class="stat-value mt-2">{{ formatBytes(cacheHeadline(cacheTotals)) }}</p>
         <p class="mt-1 font-mono text-[10px] text-faint">
-          <template v-if="cacheTotals.complete">
+          <template v-if="cacheCaption(cacheTotals) === 'complete'">
             of {{ formatBytes(cacheTotals.capacity) }} · {{ formatBytes(cacheTotals.free) }} free
           </template>
-          <template v-else-if="cacheTotals.used > 0">Across reporting cache roots</template>
+          <template v-else-if="cacheCaption(cacheTotals) === 'partial'">Across reporting cache roots</template>
           <template v-else>Cache telemetry unavailable</template>
         </p>
       </div>
