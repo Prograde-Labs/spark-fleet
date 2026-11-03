@@ -50,7 +50,9 @@ The controller exposes:
 3. Build and start an agent on each node. `SPARK_FLEET_AGENT_NODE_ID` must
    match the id you register in the controller; override it per node (for
    example `spark-02`). `SPARK_FLEET_MODEL_CACHE_HOST_DIR` is the single host
-   cache root mounted at `/srv/spark-fleet/hub` inside the agent.
+   cache root mounted at `/srv/spark-fleet/hub` inside the agent. Point it at the
+   Hugging Face `hub` directory (the one containing `models--*` entries), not
+   the cache's parent.
 
    ```sh
    SPARK_FLEET_AGENT_NODE_ID=spark-01 \
