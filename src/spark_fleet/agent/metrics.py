@@ -284,18 +284,18 @@ def cache_disk_usage(roots: Sequence[Path]) -> tuple[int, str | None]:
         for dirpath, _dirnames, filenames in os.walk(root, onerror=errors.append):
             for filename in filenames:
                 path = Path(dirpath) / filename
-                if path.is_symlink():
-                    continue
                 try:
-                    stat = path.stat()
+                    if path.is_symlink():
+                        continue
+                    info = path.stat()
                 except OSError as exc:
                     errors.append(exc)
                     continue
-                inode = (stat.st_dev, stat.st_ino)
+                inode = (info.st_dev, info.st_ino)
                 if inode in seen:
                     continue
                 seen.add(inode)
-                total += stat.st_size
+                total += info.st_size
     if errors:
         return total, "; ".join(_error_text(error) for error in errors)
     return total, None

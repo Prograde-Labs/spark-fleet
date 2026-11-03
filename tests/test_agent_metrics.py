@@ -607,6 +607,51 @@ def test_cache_disk_usage_uses_exception_type_for_empty_error_text(tmp_path, mon
     assert error == "OSError"
 
 
+def test_cache_disk_usage_records_empty_stat_error(tmp_path, monkeypatch):
+    root = tmp_path / "hub"
+    root.mkdir()
+    (root / "good").write_bytes(b"1234")
+    (root / "bad").write_bytes(b"x")
+    real_stat = Path.stat
+
+    def fake_stat(self, *args, **kwargs):
+        if self.name == "bad":
+            raise OSError()
+        return real_stat(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "stat", fake_stat)
+
+    total, error = cache_disk_usage([root])
+
+    assert total == 4
+    assert error == "OSError"
+
+
+def test_cache_filesystem_usage_probes_later_root_after_usage_failure(tmp_path):
+    first = tmp_path / "hub"
+    second = tmp_path / "hub" / "models"
+    first.mkdir()
+    second.mkdir()
+    calls = []
+
+    def fake_stat(path):
+        return SimpleNamespace(st_dev=7, st_mode=stat.S_IFDIR)
+
+    def fake_usage(path):
+        calls.append(path)
+        if path == first:
+            raise OSError("first failed")
+        return SimpleNamespace(total=1000, free=250)
+
+    total, free, error = cache_filesystem_usage(
+        [first, second], stat=fake_stat, disk_usage=fake_usage
+    )
+
+    assert (total, free) == (1000, 250)
+    assert calls == [first, second]
+    assert "first failed" in error
+
+
 def test_cache_filesystem_usage_skips_duplicate_device_without_probing(tmp_path):
     first = tmp_path / "hub"
     second = tmp_path / "hub" / "models"
@@ -876,6 +921,20 @@ def test_collect_metrics_reports_no_cache_roots(tmp_path):
         gpu_sampler=lambda: ((), None),
     )
 
+    assert snapshot.cache_total_bytes is None
+    assert snapshot.cache_free_bytes is None
+    assert "no cache roots configured" in snapshot.errors["cache"]
+
+
+def test_collect_metrics_uses_default_samplers_for_empty_roots(tmp_path):
+    snapshot = collect_metrics(
+        [],
+        meminfo_path=write_meminfo(tmp_path),
+        container_sampler=lambda: [],
+        gpu_sampler=lambda: ((), None),
+    )
+
+    assert snapshot.cache_bytes == 0
     assert snapshot.cache_total_bytes is None
     assert snapshot.cache_free_bytes is None
     assert "no cache roots configured" in snapshot.errors["cache"]
