@@ -29,8 +29,13 @@ MEMINFO = """MemTotal:       131072000 kB
 MemAvailable:    65536000 kB
 """
 
-GPU_CSV = """0, NVIDIA GB10, 65536, 1024, 5, 40
-1, NVIDIA GB10, 65536, [N/A], [N/A], [N/A]
+GPU_CSV = """0, NVIDIA GB10, 65536, 1024, 5, 40, GPU-aaa
+1, NVIDIA GB10, 65536, [N/A], [N/A], [N/A], GPU-bbb
+"""
+
+COMPUTE_CSV = """GPU-aaa, 111, python, 512
+GPU-aaa, 222, python, 256
+GPU-bbb, 333, tf-demo-lanes, 106268
 """
 
 
@@ -38,6 +43,17 @@ def completed(args, returncode=0, stdout="", stderr=""):
     return subprocess.CompletedProcess(
         args=args, returncode=returncode, stdout=stdout, stderr=stderr
     )
+
+
+def dispatch_runner(gpu_stdout=GPU_CSV, compute_stdout=COMPUTE_CSV):
+    """Fake nvidia-smi that answers the GPU and compute-app queries separately."""
+
+    def runner(args, **kwargs):
+        if any("--query-compute-apps" in arg for arg in args):
+            return completed(args, stdout=compute_stdout)
+        return completed(args, stdout=gpu_stdout)
+
+    return runner
 
 
 def container(
@@ -137,7 +153,7 @@ def test_collect_gpus_parses_output():
 
     def runner(args, **kwargs):
         calls.append((args, kwargs))
-        return completed(args, stdout=GPU_CSV)
+        return dispatch_runner()(args, **kwargs)
 
     gpus, error = collect_gpus(runner=runner)
 
@@ -150,6 +166,9 @@ def test_collect_gpus_parses_output():
             memory_used_bytes=1024 * 1024 * 1024,
             utilization_percent=5,
             temperature_celsius=40,
+            uuid="GPU-aaa",
+            compute_processes=2,
+            compute_memory_bytes=768 * 1024 * 1024,
         ),
         GpuInfo(
             index=1,
@@ -158,21 +177,33 @@ def test_collect_gpus_parses_output():
             memory_used_bytes=None,
             utilization_percent=None,
             temperature_celsius=None,
+            uuid="GPU-bbb",
+            compute_processes=1,
+            compute_memory_bytes=106_268 * 1024 * 1024,
         ),
     )
     assert calls[0][0] == [
         "nvidia-smi",
-        "--query-gpu=index,name,memory.total,memory.used,utilization.gpu,temperature.gpu",
+        "--query-gpu=index,name,memory.total,memory.used,utilization.gpu,"
+        "temperature.gpu,uuid",
         "--format=csv,noheader,nounits",
     ]
     assert calls[0][1]["capture_output"] is True
     assert calls[0][1]["text"] is True
+    assert calls[1][0] == [
+        "nvidia-smi",
+        "--query-compute-apps=gpu_uuid,pid,process_name,used_memory",
+        "--format=csv,noheader,nounits",
+    ]
 
 
 def test_collect_gpus_handles_unsupported_fields_and_quoted_names():
-    stdout = '0, "NVIDIA GB10, Rev 2", 65536, 1024, [Not Supported], [Insufficient Permissions]\n'
+    stdout = (
+        '0, "NVIDIA GB10, Rev 2", 65536, 1024, [Not Supported], '
+        "[Insufficient Permissions], GPU-ccc\n"
+    )
 
-    gpus, error = collect_gpus(runner=lambda args, **kwargs: completed(args, stdout=stdout))
+    gpus, error = collect_gpus(runner=dispatch_runner(gpu_stdout=stdout, compute_stdout=""))
 
     assert error is None
     assert gpus[0].name == "NVIDIA GB10, Rev 2"
@@ -180,12 +211,16 @@ def test_collect_gpus_handles_unsupported_fields_and_quoted_names():
     assert gpus[0].memory_used_bytes == 1024 * 1024 * 1024
     assert gpus[0].utilization_percent is None
     assert gpus[0].temperature_celsius is None
+    assert gpus[0].uuid == "GPU-ccc"
+    assert gpus[0].compute_processes == 0
 
 
 def test_collect_gpus_keeps_valid_rows_when_one_is_malformed():
-    stdout = "0, NVIDIA GB10, 65536, 1024, 5, 40\nnot,a,valid,row\n"
+    stdout = "0, NVIDIA GB10, 65536, 1024, 5, 40, GPU-aaa\nnot,a,valid,row\n"
 
-    gpus, error = collect_gpus(runner=lambda args, **kwargs: completed(args, stdout=stdout))
+    gpus, error = collect_gpus(
+        runner=dispatch_runner(gpu_stdout=stdout, compute_stdout="")
+    )
 
     assert len(gpus) == 1
     assert gpus[0].index == 0
@@ -193,7 +228,7 @@ def test_collect_gpus_keeps_valid_rows_when_one_is_malformed():
 
 
 def test_collect_gpus_returns_empty_for_no_gpus():
-    gpus, error = collect_gpus(runner=lambda args, **kwargs: completed(args, stdout=""))
+    gpus, error = collect_gpus(runner=dispatch_runner(gpu_stdout="", compute_stdout=""))
 
     assert gpus == ()
     assert error is None
@@ -235,6 +270,133 @@ def test_collect_gpus_reports_malformed_output():
 
     assert gpus == ()
     assert "could not parse" in error
+
+
+def test_collect_gpus_reports_compute_app_failure():
+    def runner(args, **kwargs):
+        if any("--query-compute-apps" in arg for arg in args):
+            return completed(args, returncode=1, stderr="compute query failed")
+        return completed(args, stdout=GPU_CSV)
+
+    gpus, error = collect_gpus(runner=runner)
+
+    assert len(gpus) == 2
+    assert [gpu.compute_processes for gpu in gpus] == [None, None]
+    assert [gpu.compute_memory_bytes for gpu in gpus] == [None, None]
+    assert "could not query compute processes" in error
+    assert "compute query failed" in error
+
+
+def test_collect_gpus_reports_compute_app_missing_binary():
+    def runner(args, **kwargs):
+        if any("--query-compute-apps" in arg for arg in args):
+            raise FileNotFoundError("nvidia-smi")
+        return completed(args, stdout=GPU_CSV)
+
+    gpus, error = collect_gpus(runner=runner)
+
+    assert len(gpus) == 2
+    assert [gpu.compute_processes for gpu in gpus] == [None, None]
+    assert "could not query compute processes" in error
+
+
+def test_collect_gpus_reports_compute_app_oserror():
+    def runner(args, **kwargs):
+        if any("--query-compute-apps" in arg for arg in args):
+            raise OSError("driver busy")
+        return completed(args, stdout=GPU_CSV)
+
+    gpus, error = collect_gpus(runner=runner)
+
+    assert len(gpus) == 2
+    assert [gpu.compute_processes for gpu in gpus] == [None, None]
+    assert "driver busy" in error
+
+
+def test_collect_gpus_reports_compute_app_timeout():
+    def runner(args, **kwargs):
+        if any("--query-compute-apps" in arg for arg in args):
+            raise subprocess.TimeoutExpired(args, 1)
+        return completed(args, stdout=GPU_CSV)
+
+    gpus, error = collect_gpus(runner=runner, timeout=1)
+
+    assert len(gpus) == 2
+    assert [gpu.compute_processes for gpu in gpus] == [None, None]
+    assert "could not query compute processes" in error
+    assert "timed out" in error
+
+
+def test_collect_gpus_reports_compute_app_parse_error_as_unknown():
+    compute = "GPU-aaa, 111, python, 512\nnot,a,valid,row,extra\n"
+
+    gpus, error = collect_gpus(
+        runner=dispatch_runner(gpu_stdout=GPU_CSV, compute_stdout=compute)
+    )
+
+    assert [gpu.compute_processes for gpu in gpus] == [None, None]
+    assert "could not parse nvidia-smi compute-apps output" in error
+
+
+def test_collect_gpus_rejects_bracketed_compute_uuid():
+    compute = "[N/A], 111, python, 512\n"
+
+    gpus, error = collect_gpus(
+        runner=dispatch_runner(gpu_stdout=GPU_CSV, compute_stdout=compute)
+    )
+
+    assert [gpu.compute_processes for gpu in gpus] == [None, None]
+    assert "could not parse nvidia-smi compute-apps output" in error
+    assert "missing GPU UUID" in error
+
+
+def test_collect_gpus_reports_missing_gpu_uuid_when_compute_rows_exist():
+    gpu_csv = "0, NVIDIA GB10, 65536, [N/A], 5, 40, [N/A]\n"
+
+    gpus, error = collect_gpus(
+        runner=dispatch_runner(gpu_stdout=gpu_csv, compute_stdout=COMPUTE_CSV)
+    )
+
+    assert gpus[0].uuid is None
+    assert gpus[0].compute_processes is None
+    assert "could not attribute compute processes" in error
+
+
+def test_collect_gpus_applies_compute_rows_when_another_gpu_row_is_malformed():
+    gpu_csv = "0, NVIDIA GB10, 65536, 1024, 5, 40, GPU-aaa\nnot,a,valid,row\n"
+
+    gpus, error = collect_gpus(
+        runner=dispatch_runner(gpu_stdout=gpu_csv, compute_stdout="GPU-aaa, 111, python, 512\n")
+    )
+
+    assert len(gpus) == 1
+    assert gpus[0].compute_processes == 1
+    assert gpus[0].compute_memory_bytes == 512 * 1024 * 1024
+    assert "could not parse nvidia-smi output" in error
+
+
+def test_collect_gpus_counts_processes_with_unknown_memory():
+    compute = "GPU-aaa, 111, python, [N/A]\nGPU-aaa, 222, python, 256\n"
+
+    gpus, error = collect_gpus(
+        runner=dispatch_runner(gpu_stdout=GPU_CSV, compute_stdout=compute)
+    )
+
+    assert error is None
+    assert gpus[0].compute_processes == 2
+    assert gpus[0].compute_memory_bytes == 256 * 1024 * 1024
+    assert gpus[1].compute_processes == 0
+
+
+def test_collect_gpus_ignores_compute_apps_for_unknown_gpu():
+    compute = "GPU-zzz, 999, python, 4096\n"
+
+    gpus, error = collect_gpus(
+        runner=dispatch_runner(gpu_stdout=GPU_CSV, compute_stdout=compute)
+    )
+
+    assert error is None
+    assert [gpu.compute_processes for gpu in gpus] == [0, 0]
 
 
 # snapshot -----------------------------------------------------------------
@@ -424,6 +586,20 @@ def test_snapshot_to_dict_shape():
                 memory_used_bytes=500,
                 utilization_percent=5,
                 temperature_celsius=40,
+                uuid="GPU-aaa",
+                compute_processes=2,
+                compute_memory_bytes=768,
+            ),
+            GpuInfo(
+                index=1,
+                name="NVIDIA GB10",
+                memory_total_bytes=None,
+                memory_used_bytes=None,
+                utilization_percent=None,
+                temperature_celsius=None,
+                uuid="GPU-bbb",
+                compute_processes=0,
+                compute_memory_bytes=0,
             ),
         ),
         errors={"gpu": "unavailable"},
@@ -460,9 +636,54 @@ def test_snapshot_to_dict_shape():
             "memory_used_bytes": 500,
             "utilization_percent": 5,
             "temperature_celsius": 40,
-        }
+            "uuid": "GPU-aaa",
+            "compute_processes": 2,
+            "compute_memory_bytes": 768,
+            "resident": True,
+        },
+        {
+            "index": 1,
+            "name": "NVIDIA GB10",
+            "memory_total_bytes": None,
+            "memory_used_bytes": None,
+            "utilization_percent": None,
+            "temperature_celsius": None,
+            "uuid": "GPU-bbb",
+            "compute_processes": 0,
+            "compute_memory_bytes": 0,
+            "resident": False,
+        },
     ]
     assert body["errors"] == {"gpu": "unavailable"}
+
+
+def test_snapshot_to_dict_reports_unknown_residency_when_compute_is_unavailable():
+    snapshot = MetricsSnapshot(
+        sampled_at=1.0,
+        host_total_bytes=1000,
+        host_available_bytes=500,
+        containers=(),
+        container_memory_bytes=0,
+        cache_bytes=0,
+        gpus=(
+            GpuInfo(
+                index=0,
+                name="NVIDIA GB10",
+                memory_total_bytes=None,
+                memory_used_bytes=None,
+                utilization_percent=95,
+                temperature_celsius=60,
+                uuid="GPU-aaa",
+            ),
+        ),
+        errors={"gpu": "could not query compute processes"},
+    )
+
+    body = snapshot_to_dict(snapshot)
+
+    assert body["gpus"][0]["compute_processes"] is None
+    assert body["gpus"][0]["compute_memory_bytes"] is None
+    assert body["gpus"][0]["resident"] is None
 
 
 # endpoint -----------------------------------------------------------------

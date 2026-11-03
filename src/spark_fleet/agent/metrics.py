@@ -4,7 +4,9 @@ The agent samples ``/proc/meminfo``, the managed fleet containers, the model
 cache roots, and ``nvidia-smi`` when it is usable. Container, cache, and GPU
 failures degrade to empty values plus an entry in ``errors`` so a missing Docker
 socket or driver does not make the whole snapshot unavailable; host memory is
-required because a node snapshot without it is meaningless.
+required because a node snapshot without it is meaningless. GPU telemetry also
+sums ``nvidia-smi --query-compute-apps`` memory per GPU UUID so unified-memory
+devices (GB10) can report workload residency even when ``memory.used`` is N/A.
 """
 
 from __future__ import annotations
@@ -15,7 +17,7 @@ import re
 import subprocess
 import time
 from collections.abc import Callable, Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
 
@@ -24,7 +26,12 @@ from spark_fleet.agent.containers import ContainerInfo
 
 MEMINFO_PATH = Path("/proc/meminfo")
 GPU_TIMEOUT_SECONDS = 5.0
-GPU_QUERY = "--query-gpu=index,name,memory.total,memory.used,utilization.gpu,temperature.gpu"
+GPU_QUERY = (
+    "--query-gpu=index,name,memory.total,memory.used,utilization.gpu,"
+    "temperature.gpu,uuid"
+)
+COMPUTE_QUERY = "--query-compute-apps=gpu_uuid,pid,process_name,used_memory"
+_GPU_FORMAT = "--format=csv,noheader,nounits"
 _MEMINFO_RE = re.compile(r"^\s*(MemTotal|MemAvailable):\s+(\d+)\s+kB\s*$")
 _MEMINFO_FIELDS = ("MemTotal", "MemAvailable")
 _MIB = 1024 * 1024
@@ -48,6 +55,9 @@ class GpuInfo:
     memory_used_bytes: int | None
     utilization_percent: int | None
     temperature_celsius: int | None
+    uuid: str | None = None
+    compute_processes: int | None = None
+    compute_memory_bytes: int | None = None
 
 
 @dataclass(frozen=True)
@@ -96,11 +106,18 @@ def read_host_memory(path: Path = MEMINFO_PATH) -> HostMemory:
 def collect_gpus(
     *, timeout: float = GPU_TIMEOUT_SECONDS, runner: Callable[..., Any] = subprocess.run
 ) -> tuple[tuple[GpuInfo, ...], str | None]:
-    """Query ``nvidia-smi`` and return GPU data plus an error when unavailable."""
+    """Query ``nvidia-smi`` and return GPU data plus an error when unavailable.
 
+    GPU capacity/utilization is required; the compute-app query is best effort so
+    that a driver that rejects ``--query-compute-apps`` still yields GPU data.
+    Compute fields stay ``None`` when the query fails so consumers can tell an
+    idle GPU from an unknown one.
+    """
+
+    started = time.monotonic()
     try:
         result = runner(
-            ["nvidia-smi", GPU_QUERY, "--format=csv,noheader,nounits"],
+            ["nvidia-smi", GPU_QUERY, _GPU_FORMAT],
             capture_output=True,
             text=True,
             check=False,
@@ -118,17 +135,102 @@ def collect_gpus(
         return (), detail or f"nvidia-smi exited {result.returncode}"
 
     gpus: list[GpuInfo] = []
-    parse_errors: list[str] = []
+    errors: list[str] = []
     for line in result.stdout.splitlines():
         if not line.strip():
             continue
         try:
             gpus.append(_parse_gpu_line(line))
         except ValueError as exc:
+            errors.append(str(exc))
+    if errors:
+        errors = [f"could not parse nvidia-smi output: {'; '.join(errors)}"]
+
+    remaining = max(0.1, timeout - (time.monotonic() - started))
+    compute_counts, compute_error = _collect_compute_apps(
+        timeout=remaining, runner=runner
+    )
+    if compute_error is not None:
+        errors.append(compute_error)
+    else:
+        if compute_counts and any(gpu.uuid is None for gpu in gpus):
+            errors.append(
+                "could not attribute compute processes: missing GPU UUID"
+            )
+        gpus = list(_apply_compute_apps(gpus, compute_counts))
+    return tuple(gpus), "; ".join(errors) or None
+
+
+def _collect_compute_apps(
+    *, timeout: float, runner: Callable[..., Any]
+) -> tuple[dict[str, tuple[int, int]], str | None]:
+    """Return per-GPU compute process counts and summed memory, best effort."""
+
+    try:
+        result = runner(
+            ["nvidia-smi", COMPUTE_QUERY, _GPU_FORMAT],
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=timeout,
+        )
+    except FileNotFoundError:
+        return {}, "could not query compute processes: nvidia-smi not available"
+    except subprocess.TimeoutExpired:
+        return {}, f"could not query compute processes: timed out after {timeout} seconds"
+    except OSError as exc:
+        return {}, f"could not query compute processes: {exc}"
+
+    if result.returncode:
+        detail = (result.stderr or result.stdout or "").strip()
+        return {}, (
+            f"could not query compute processes: {detail}"
+            if detail
+            else f"could not query compute processes: exited {result.returncode}"
+        )
+
+    counts: dict[str, tuple[int, int]] = {}
+    parse_errors: list[str] = []
+    for line in result.stdout.splitlines():
+        if not line.strip():
+            continue
+        try:
+            uuid, memory_bytes = _parse_compute_line(line)
+        except ValueError as exc:
             parse_errors.append(str(exc))
+            continue
+        count, total = counts.get(uuid, (0, 0))
+        counts[uuid] = (count + 1, total + memory_bytes)
     if parse_errors:
-        return tuple(gpus), f"could not parse nvidia-smi output: {'; '.join(parse_errors)}"
-    return tuple(gpus), None
+        return counts, (
+            "could not parse nvidia-smi compute-apps output: "
+            + "; ".join(parse_errors)
+        )
+    return counts, None
+
+
+def _apply_compute_apps(
+    gpus: Sequence[GpuInfo], counts: Mapping[str, tuple[int, int]]
+) -> tuple[GpuInfo, ...]:
+    updated: list[GpuInfo] = []
+    for gpu in gpus:
+        if gpu.uuid is None:
+            if not counts:
+                updated.append(
+                    replace(gpu, compute_processes=0, compute_memory_bytes=0)
+                )
+            else:
+                updated.append(gpu)
+            continue
+        processes, memory_bytes = counts.get(gpu.uuid, (0, 0))
+        updated.append(
+            replace(
+                gpu,
+                compute_processes=processes,
+                compute_memory_bytes=memory_bytes,
+            )
+        )
+    return tuple(updated)
 
 
 def cache_disk_usage(roots: Sequence[Path]) -> tuple[int, str | None]:
@@ -246,6 +348,14 @@ def snapshot_to_dict(snapshot: MetricsSnapshot) -> dict[str, Any]:
                 "memory_used_bytes": gpu.memory_used_bytes,
                 "utilization_percent": gpu.utilization_percent,
                 "temperature_celsius": gpu.temperature_celsius,
+                "uuid": gpu.uuid,
+                "compute_processes": gpu.compute_processes,
+                "compute_memory_bytes": gpu.compute_memory_bytes,
+                "resident": (
+                    None
+                    if gpu.compute_processes is None
+                    else gpu.compute_processes > 0
+                ),
             }
             for gpu in snapshot.gpus
         ],
@@ -258,9 +368,9 @@ def _parse_gpu_line(line: str) -> GpuInfo:
         rows = list(csv.reader([line], skipinitialspace=True))
     except csv.Error as exc:
         raise ValueError(f"invalid CSV row: {line!r}") from exc
-    if len(rows) != 1 or len(rows[0]) != 6:
+    if len(rows) != 1 or len(rows[0]) != 7:
         count = len(rows[0]) if len(rows) == 1 else 0
-        raise ValueError(f"expected 6 fields, got {count}: {line!r}")
+        raise ValueError(f"expected 7 fields, got {count}: {line!r}")
     fields = [field.strip() for field in rows[0]]
     index = _required_int(fields[0], "index")
     name = fields[1]
@@ -273,7 +383,23 @@ def _parse_gpu_line(line: str) -> GpuInfo:
         memory_used_bytes=_mib(fields[3]),
         utilization_percent=_optional_int(fields[4]),
         temperature_celsius=_optional_int(fields[5]),
+        uuid=_optional_text(fields[6]),
     )
+
+
+def _parse_compute_line(line: str) -> tuple[str, int]:
+    try:
+        rows = list(csv.reader([line], skipinitialspace=True))
+    except csv.Error as exc:
+        raise ValueError(f"invalid CSV row: {line!r}") from exc
+    if len(rows) != 1 or len(rows[0]) != 4:
+        count = len(rows[0]) if len(rows) == 1 else 0
+        raise ValueError(f"expected 4 fields, got {count}: {line!r}")
+    fields = [field.strip() for field in rows[0]]
+    uuid = _optional_text(fields[0])
+    if uuid is None:
+        raise ValueError(f"missing GPU UUID: {line!r}")
+    return uuid, _mib(fields[3]) or 0
 
 
 def _required_int(value: str, field: str) -> int:
@@ -290,6 +416,12 @@ def _optional_int(value: str) -> int | None:
         return int(value)
     except ValueError as exc:
         raise ValueError(f"invalid numeric value: {value!r}") from exc
+
+
+def _optional_text(value: str) -> str | None:
+    if not value or (value.startswith("[") and value.endswith("]")):
+        return None
+    return value
 
 
 def _mib(value: str) -> int | None:
