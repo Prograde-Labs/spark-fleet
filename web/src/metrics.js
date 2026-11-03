@@ -35,12 +35,22 @@ export function cacheKnown(metrics) {
   )
 }
 
+export function cacheBytesKnown(metrics) {
+  return reported(metrics.cache_bytes)
+}
+
 export function cacheHeadline(aggregate) {
   return aggregate.reported > 0 ? aggregate.used : null
 }
 
 export function cacheCaption(aggregate) {
-  if (aggregate.reported === 0) return 'unavailable'
+  if (
+    aggregate.reported === 0 &&
+    aggregate.capacity === 0 &&
+    aggregate.free === 0
+  ) {
+    return 'unavailable'
+  }
   return aggregate.complete ? 'complete' : 'partial'
 }
 

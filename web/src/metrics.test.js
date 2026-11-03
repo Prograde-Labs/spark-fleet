@@ -3,6 +3,7 @@ import test from 'node:test'
 
 import {
   cacheAggregate,
+  cacheBytesKnown,
   cacheCaption,
   cacheCapacityKnown,
   cacheHeadline,
@@ -42,6 +43,13 @@ test('cacheKnown requires capacity and free space', () => {
   assert.equal(cacheKnown({ cache_total_bytes: 1000, cache_free_bytes: null }), false)
   assert.equal(cacheKnown({ cache_total_bytes: 0, cache_free_bytes: 0 }), false)
   assert.equal(cacheKnown({}), false)
+})
+
+test('cacheBytesKnown accepts a reported zero', () => {
+  assert.equal(cacheBytesKnown({ cache_bytes: 10 }), true)
+  assert.equal(cacheBytesKnown({ cache_bytes: 0 }), true)
+  assert.equal(cacheBytesKnown({ cache_bytes: null }), false)
+  assert.equal(cacheBytesKnown({}), false)
 })
 
 test('cachePercent scales cache bytes to filesystem capacity', () => {
@@ -93,6 +101,22 @@ test('cacheAggregate is incomplete when a node fetch failed', () => {
     complete: false,
     reported: 1,
   })
+})
+
+test('cacheAggregate is incomplete when a failed fetch retains cache fields', () => {
+  const aggregate = cacheAggregate({
+    a: { cache_bytes: 10, cache_total_bytes: 1000, cache_free_bytes: 250 },
+    b: {
+      cache_bytes: 5,
+      cache_total_bytes: 4000,
+      cache_free_bytes: 1000,
+      fetchFailed: true,
+    },
+  })
+
+  assert.equal(aggregate.complete, false)
+  assert.equal(aggregate.reported, 2)
+  assert.equal(aggregate.used, 15)
 })
 
 test('cacheAggregate includes a zero-byte contributor with capacity', () => {
@@ -238,6 +262,12 @@ test('cacheCaption distinguishes complete, partial, and unavailable', () => {
   assert.equal(
     cacheCaption(
       cacheAggregate({ a: { cache_bytes: 10, cache_total_bytes: 1000 } }),
+    ),
+    'partial',
+  )
+  assert.equal(
+    cacheCaption(
+      cacheAggregate({ a: { cache_total_bytes: 1000, cache_free_bytes: 250 } }),
     ),
     'partial',
   )

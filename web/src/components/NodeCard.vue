@@ -13,6 +13,7 @@ import {
 } from 'lucide-vue-next'
 import { formatBytes, formatPercent, formatRelative } from '../format'
 import {
+  cacheBytesKnown,
   cacheKnown as metricsCacheKnown,
   cachePercent,
   gpuMemoryKnown,
@@ -44,6 +45,7 @@ const ringOffset = computed(
 const cacheTotal = computed(() => props.metrics.cache_total_bytes)
 const cacheFree = computed(() => props.metrics.cache_free_bytes)
 const cacheKnown = computed(() => metricsCacheKnown(props.metrics))
+const cacheBytes = computed(() => cacheBytesKnown(props.metrics))
 const cacheBarPercent = computed(() => cachePercent(props.metrics))
 const containerPercent = computed(() =>
   total.value > 0
@@ -164,7 +166,7 @@ const gpuPercent = (gpu, key) => {
             </span>
             <span class="hud-value text-[11px]">{{ formatBytes(metrics.cache_bytes) }}</span>
           </div>
-          <div class="mt-1 h-1.5 overflow-hidden rounded-full bg-edge">
+          <div v-if="cacheBytes" class="mt-1 h-1.5 overflow-hidden rounded-full bg-edge">
             <div
               class="h-full rounded-full bg-violet/70 transition-all duration-700"
               :style="{ width: `${cacheBarPercent}%` }"

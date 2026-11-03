@@ -59,6 +59,7 @@ const onlineNodes = computed(
 const liveEvents = computed(() => eventState.events.slice(0, 40))
 
 async function load() {
+  if (refreshing.value) return
   refreshing.value = true
   error.value = null
   try {
@@ -78,20 +79,23 @@ async function load() {
 }
 
 async function loadMetrics() {
+  const targets = nodes.value.filter((node) => node.enabled)
+  let failures = 0
   const entries = await Promise.all(
-    nodes.value.map(async (node) => {
+    targets.map(async (node) => {
       try {
         const response = await api.metrics.node(node.id, { limit: 1 })
         return [node.id, response.latest || {}]
       } catch {
-        return [
-          node.id,
-          { ...(metricsByNode.value[node.id] || {}), fetchFailed: true },
-        ]
+        failures += 1
+        return [node.id, { fetchFailed: true }]
       }
     }),
   )
   metricsByNode.value = Object.fromEntries(entries)
+  if (targets.length > 0 && failures === targets.length) {
+    throw new Error('Metrics unavailable for every node')
+  }
 }
 
 async function checkNode(node) {
