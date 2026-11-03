@@ -69,7 +69,7 @@ class MetricsSnapshot:
     host_available_bytes: int
     containers: tuple[ContainerInfo, ...]
     container_memory_bytes: int
-    cache_bytes: int
+    cache_bytes: int | None
     cache_total_bytes: int | None
     cache_free_bytes: int | None
     gpus: tuple[GpuInfo, ...]
@@ -268,6 +268,10 @@ def _apply_compute_apps(
     return tuple(updated)
 
 
+def _error_text(exc: BaseException) -> str:
+    return str(exc) or type(exc).__name__
+
+
 def cache_disk_usage(roots: Sequence[Path]) -> tuple[int, str | None]:
     """Sum inode-deduplicated cache bytes and report unreadable subtrees."""
 
@@ -293,12 +297,8 @@ def cache_disk_usage(roots: Sequence[Path]) -> tuple[int, str | None]:
                 seen.add(inode)
                 total += stat.st_size
     if errors:
-        return total, "; ".join(str(error) for error in errors)
+        return total, "; ".join(_error_text(error) for error in errors)
     return total, None
-
-
-def _error_text(exc: BaseException) -> str:
-    return str(exc) or type(exc).__name__
 
 
 def cache_filesystem_usage(
@@ -306,7 +306,7 @@ def cache_filesystem_usage(
     *,
     stat: Callable[[Path], os.stat_result] = os.stat,
     disk_usage: Callable[[Path], Any] = shutil.disk_usage,
-) -> tuple[int, int, str | None]:
+) -> tuple[int | None, int | None, str | None]:
     """Return deduplicated filesystem capacity and free bytes for cache roots."""
 
     seen: set[int] = set()
@@ -337,10 +337,14 @@ def cache_filesystem_usage(
         resolved += 1
         total += usage.total
         free += usage.free
-    if roots and resolved == 0:
+    if not roots:
+        errors.append("no cache roots configured")
+    elif resolved == 0:
         errors.append(
             "no usable cache root: " + ", ".join(str(root) for root in roots)
         )
+    if resolved == 0:
+        return None, None, "; ".join(errors)
     if errors:
         return total, free, "; ".join(errors)
     return total, free, None
@@ -352,7 +356,9 @@ def collect_metrics(
     meminfo_path: Path = MEMINFO_PATH,
     container_sampler: Callable[[], Sequence[ContainerInfo]] | None = None,
     cache_sampler: Callable[[], int] | None = None,
-    cache_usage_sampler: Callable[[], tuple[int, int, str | None]] | None = None,
+    cache_usage_sampler: (
+        Callable[[], tuple[int | None, int | None, str | None]] | None
+    ) = None,
     gpu_sampler: Callable[[], tuple[tuple[GpuInfo, ...], str | None]] | None = None,
     clock: Callable[[], float] = time.time,
 ) -> MetricsSnapshot:
@@ -377,7 +383,7 @@ def collect_metrics(
         try:
             cache_bytes = cache_sampler()
         except Exception as exc:
-            cache_bytes = 0
+            cache_bytes = None
             cache_errors.append(_error_text(exc))
     else:
         cache_bytes, cache_error = cache_disk_usage(cache_roots)
@@ -395,7 +401,6 @@ def collect_metrics(
             cache_roots
         )
     if usage_error:
-        cache_total_bytes, cache_free_bytes = None, None
         cache_errors.append(usage_error)
     if cache_errors:
         errors["cache"] = "; ".join(cache_errors)

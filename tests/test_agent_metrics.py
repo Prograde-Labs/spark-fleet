@@ -554,7 +554,7 @@ def test_collect_metrics_records_cache_error(tmp_path):
         gpu_sampler=lambda: ((), None),
     )
 
-    assert snapshot.cache_bytes == 0
+    assert snapshot.cache_bytes is None
     assert "permission denied" in snapshot.errors["cache"]
 
 
@@ -640,12 +640,16 @@ def test_cache_filesystem_usage_dedupes_real_roots(tmp_path):
     second = tmp_path / "hub" / "models"
     first.mkdir()
     second.mkdir()
+    calls = []
 
-    total, free, error = cache_filesystem_usage([first, second])
+    def fake_usage(path):
+        calls.append(path)
+        return SimpleNamespace(total=1000, free=250)
 
-    assert total == shutil.disk_usage(first).total
-    assert free > 0
-    assert error is None
+    total, free, error = cache_filesystem_usage([first, second], disk_usage=fake_usage)
+
+    assert (total, free, error) == (1000, 250, None)
+    assert calls == [first]
 
 
 def test_cache_filesystem_usage_reports_when_no_root_resolves(tmp_path):
@@ -655,10 +659,17 @@ def test_cache_filesystem_usage_reports_when_no_root_resolves(tmp_path):
 
     total, free, error = cache_filesystem_usage([missing, file_root])
 
-    assert (total, free) == (0, 0)
+    assert (total, free) == (None, None)
     assert "no usable cache root" in error
     assert str(missing) in error
     assert str(file_root) in error
+
+
+def test_cache_filesystem_usage_reports_empty_root_list():
+    total, free, error = cache_filesystem_usage([])
+
+    assert (total, free) == (None, None)
+    assert error == "no cache roots configured"
 
 
 def test_cache_filesystem_usage_reports_missing_root_beside_valid_root(tmp_path):
@@ -666,10 +677,12 @@ def test_cache_filesystem_usage_reports_missing_root_beside_valid_root(tmp_path)
     missing = tmp_path / "missing"
     root.mkdir()
 
-    total, free, error = cache_filesystem_usage([missing, root])
+    total, free, error = cache_filesystem_usage(
+        [missing, root],
+        disk_usage=lambda path: SimpleNamespace(total=1000, free=250),
+    )
 
-    assert total == shutil.disk_usage(root).total
-    assert free > 0
+    assert (total, free) == (1000, 250)
     assert f"{missing}: not found" in error
 
 
@@ -695,7 +708,7 @@ def test_cache_filesystem_usage_reports_stat_and_usage_errors(tmp_path):
         disk_usage=fake_usage,
     )
 
-    assert (total, free) == (0, 0)
+    assert (total, free) == (None, None)
     assert "stat denied" in error
     assert "usage denied" in error
 
@@ -741,13 +754,28 @@ def test_collect_metrics_records_cache_capacity_error(tmp_path):
         meminfo_path=write_meminfo(tmp_path),
         container_sampler=lambda: [],
         cache_sampler=lambda: 500,
-        cache_usage_sampler=lambda: (0, 0, "disk usage failed"),
+        cache_usage_sampler=lambda: (None, None, "disk usage failed"),
         gpu_sampler=lambda: ((), None),
     )
 
     assert snapshot.cache_total_bytes is None
     assert snapshot.cache_free_bytes is None
     assert "disk usage failed" in snapshot.errors["cache"]
+
+
+def test_collect_metrics_keeps_partial_capacity_beside_a_bad_root(tmp_path):
+    snapshot = collect_metrics(
+        [tmp_path / "hub"],
+        meminfo_path=write_meminfo(tmp_path),
+        container_sampler=lambda: [],
+        cache_sampler=lambda: 500,
+        cache_usage_sampler=lambda: (1000, 250, "one root missing"),
+        gpu_sampler=lambda: ((), None),
+    )
+
+    assert snapshot.cache_total_bytes == 1000
+    assert snapshot.cache_free_bytes == 250
+    assert "one root missing" in snapshot.errors["cache"]
 
 
 def test_collect_metrics_records_cache_usage_sampler_exception(tmp_path):
@@ -777,14 +805,48 @@ def test_collect_metrics_aggregates_cache_errors_from_both_sources(tmp_path):
         meminfo_path=write_meminfo(tmp_path),
         container_sampler=lambda: [],
         cache_sampler=fail_bytes,
-        cache_usage_sampler=lambda: (0, 0, "statvfs failed"),
+        cache_usage_sampler=lambda: (None, None, "statvfs failed"),
+        gpu_sampler=lambda: ((), None),
+    )
+
+    assert snapshot.cache_bytes is None
+    assert snapshot.cache_total_bytes is None
+    assert snapshot.cache_free_bytes is None
+    assert "walk failed" in snapshot.errors["cache"]
+    assert "statvfs failed" in snapshot.errors["cache"]
+
+
+def test_collect_metrics_uses_exception_type_for_empty_error_text(tmp_path):
+    def fail():
+        raise OSError()
+
+    snapshot = collect_metrics(
+        [tmp_path / "hub"],
+        meminfo_path=write_meminfo(tmp_path),
+        container_sampler=lambda: [],
+        cache_sampler=lambda: 500,
+        cache_usage_sampler=fail,
         gpu_sampler=lambda: ((), None),
     )
 
     assert snapshot.cache_total_bytes is None
     assert snapshot.cache_free_bytes is None
-    assert "walk failed" in snapshot.errors["cache"]
-    assert "statvfs failed" in snapshot.errors["cache"]
+    assert snapshot.errors["cache"] == "OSError"
+
+
+def test_collect_metrics_ignores_empty_capacity_error_text(tmp_path):
+    snapshot = collect_metrics(
+        [tmp_path / "hub"],
+        meminfo_path=write_meminfo(tmp_path),
+        container_sampler=lambda: [],
+        cache_sampler=lambda: 500,
+        cache_usage_sampler=lambda: (1000, 250, ""),
+        gpu_sampler=lambda: ((), None),
+    )
+
+    assert snapshot.cache_total_bytes == 1000
+    assert snapshot.cache_free_bytes == 250
+    assert "cache" not in snapshot.errors
 
 
 def test_collect_metrics_records_default_cache_error(tmp_path, monkeypatch):

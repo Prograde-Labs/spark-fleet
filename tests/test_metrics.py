@@ -172,6 +172,29 @@ def test_agent_snapshot_serializer_feeds_controller_series(store):
     assert latest["gpu.0.resident"] == 1.0
 
 
+def test_agent_snapshot_serializer_omits_unknown_capacity(store):
+    snapshot = MetricsSnapshot(
+        sampled_at=1.0,
+        host_total_bytes=1000,
+        host_available_bytes=500,
+        containers=(),
+        container_memory_bytes=0,
+        cache_bytes=None,
+        cache_total_bytes=None,
+        cache_free_bytes=None,
+        gpus=(),
+        errors={"cache": "no usable cache root"},
+    )
+
+    store.record_node_snapshot("spark-01", snapshot_to_dict(snapshot), ts=1234.0)
+
+    latest = store.latest_node_metrics("spark-01")
+    assert CACHE_BYTES not in latest
+    assert CACHE_TOTAL not in latest
+    assert CACHE_FREE not in latest
+    assert latest[HOST_TOTAL] == 1000.0
+
+
 def test_record_node_snapshot_skips_missing_and_invalid_values(store):
     store.record_node_snapshot(
         "spark-01",
