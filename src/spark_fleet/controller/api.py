@@ -793,9 +793,9 @@ def build_app(
     # Gateway --------------------------------------------------------------
 
     @app.get("/v1/models")
-    def gateway_models() -> dict[str, Any]:
+    async def gateway_models() -> dict[str, Any]:
         try:
-            return gateway.models()
+            return await gateway.models()
         except GatewayError as exc:
             return JSONResponse({"detail": str(exc)}, status_code=exc.status_code)
 

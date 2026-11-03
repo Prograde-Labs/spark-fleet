@@ -21,7 +21,10 @@ from spark_fleet.controller.metrics import MetricsStore
 from spark_fleet.shared.db import Database
 
 
-def recipe(name, node, served_name, aliases=(), port=8888):
+def recipe(name, node, served_name, aliases=(), port=8888, context_length=None):
+    model = {"repo": "org/model", "servedName": served_name}
+    if context_length is not None:
+        model["contextLength"] = context_length
     return {
         "apiVersion": "spark-fleet/v1",
         "kind": "Recipe",
@@ -29,7 +32,7 @@ def recipe(name, node, served_name, aliases=(), port=8888):
         "spec": {
             "mode": "deployment",
             "runtime": "custom",
-            "model": {"repo": "org/model", "servedName": served_name},
+            "model": model,
             "gateway": {"aliases": list(aliases)},
             "roles": [
                 {
@@ -70,6 +73,7 @@ def add_deployment(
     status="loaded",
     primary=False,
     port=8888,
+    context_length=None,
 ):
     add_node(db, node, lan_ip)
     db.create_deployment(
@@ -77,7 +81,7 @@ def add_deployment(
         name,
         name,
         "deployment",
-        recipe(name, node, served_name, aliases, port),
+        recipe(name, node, served_name, aliases, port, context_length),
         status=status,
     )
     if primary:
@@ -156,8 +160,10 @@ def test_reserved_spark_active_alias_is_rejected(db):
         gateway.routing_table()
 
 
-def test_models_lists_loaded_models_and_spark_active(db):
-    add_deployment(db, "dep-1", "one", served_name="ONE", aliases=("one",), primary=True)
+async def test_models_lists_loaded_models_and_spark_active(db):
+    add_deployment(
+        db, "dep-1", "one", served_name="ONE", aliases=("one",), primary=True, context_length=1024
+    )
     add_deployment(
         db,
         "dep-2",
@@ -166,11 +172,12 @@ def test_models_lists_loaded_models_and_spark_active(db):
         lan_ip="192.0.2.79",
         served_name="TWO",
         aliases=("two",),
+        context_length=2048,
     )
     add_deployment(db, "dep-loading", "loading", served_name="LOADING", status="loading")
-    gateway = FleetGateway(db)
 
-    body = gateway.models()
+    async with FleetGateway(db) as gateway:
+        body = await gateway.models()
 
     assert body["object"] == "list"
     assert [item["id"] for item in body["data"]] == [
@@ -180,6 +187,208 @@ def test_models_lists_loaded_models_and_spark_active(db):
         "spark-active",
         "two",
     ]
+
+
+async def test_models_reports_explicit_recipe_context_length(db):
+    add_deployment(
+        db,
+        "dep-1",
+        "one",
+        served_name="ONE",
+        aliases=("one",),
+        primary=True,
+        context_length=524288,
+    )
+
+    async with FleetGateway(db) as gateway:
+        body = await gateway.models()
+
+    assert [item["id"] for item in body["data"]] == ["ONE", "one", "spark-active"]
+    for item in body["data"]:
+        assert item["max_model_len"] == 524288
+        assert item["context_length"] == 524288
+
+
+async def test_models_prefers_recipe_context_over_upstream(db):
+    add_deployment(db, context_length=524288)
+    calls = []
+
+    def handler(request):
+        calls.append(str(request.url))
+        return httpx.Response(
+            200,
+            json={"object": "list", "data": [{"id": "Demo-Model-B", "max_model_len": 262144}]},
+        )
+
+    async with FleetGateway(db, transport=httpx.MockTransport(handler)) as gateway:
+        body = await gateway.models()
+
+    assert calls == []
+    assert {item["max_model_len"] for item in body["data"]} == {524288}
+
+
+async def test_models_falls_back_to_upstream_max_model_len(db):
+    add_deployment(db, served_name="Demo-Model-B", aliases=("demo-glm",))
+    seen = {}
+
+    def handler(request):
+        seen["url"] = str(request.url)
+        return httpx.Response(
+            200,
+            json={"object": "list", "data": [{"id": "Demo-Model-B", "max_model_len": 262144}]},
+        )
+
+    async with FleetGateway(db, transport=httpx.MockTransport(handler)) as gateway:
+        body = await gateway.models()
+
+    assert seen["url"] == "http://192.0.2.239:8888/v1/models"
+    assert {item["id"]: item["max_model_len"] for item in body["data"]} == {
+        "Demo-Model-B": 262144,
+        "demo-glm": 262144,
+    }
+    assert {item["context_length"] for item in body["data"]} == {262144}
+
+
+async def test_models_falls_back_to_upstream_context_length(db):
+    add_deployment(db)
+
+    def handler(request):
+        return httpx.Response(
+            200,
+            json={"object": "list", "data": [{"id": "Demo-Model-B", "context_length": 850000}]},
+        )
+
+    async with FleetGateway(db, transport=httpx.MockTransport(handler)) as gateway:
+        body = await gateway.models()
+
+    assert {item["max_model_len"] for item in body["data"]} == {850000}
+
+
+async def test_models_matches_upstream_entry_by_served_name(db):
+    add_deployment(db, served_name="Demo-Model-B")
+    add_deployment(
+        db,
+        "dep-2",
+        "other",
+        node="spark-02",
+        lan_ip="192.0.2.79",
+        served_name="OTHER",
+        aliases=("other",),
+        port=8889,
+    )
+
+    def handler(request):
+        if request.url.port == 8888:
+            entries = [
+                {"id": "OTHER", "max_model_len": 111111},
+                {"id": "Demo-Model-B", "max_model_len": 262144},
+            ]
+        else:
+            entries = [
+                {"id": "Demo-Model-B", "max_model_len": 222222},
+                {"id": "OTHER", "max_model_len": 850000},
+            ]
+        return httpx.Response(200, json={"object": "list", "data": entries})
+
+    async with FleetGateway(db, transport=httpx.MockTransport(handler)) as gateway:
+        body = await gateway.models()
+
+    contexts = {item["id"]: item["max_model_len"] for item in body["data"]}
+    assert contexts == {
+        "Demo-Model-B": 262144,
+        "OTHER": 850000,
+        "demo-glm": 262144,
+        "other": 850000,
+    }
+
+
+async def test_models_does_not_guess_context_for_multi_model_upstream(db):
+    add_deployment(db, served_name="Demo-Model-B")
+
+    def handler(request):
+        return httpx.Response(
+            200,
+            json={
+                "object": "list",
+                "data": [
+                    {"id": "A", "max_model_len": 111111},
+                    {"id": "B", "max_model_len": 222222},
+                ],
+            },
+        )
+
+    async with FleetGateway(db, transport=httpx.MockTransport(handler)) as gateway:
+        body = await gateway.models()
+
+    for item in body["data"]:
+        assert "max_model_len" not in item
+        assert "context_length" not in item
+
+
+async def test_models_omits_context_when_upstream_fails(db):
+    add_deployment(db)
+
+    def handler(request):
+        raise httpx.ConnectError("upstream down", request=request)
+
+    async with FleetGateway(db, transport=httpx.MockTransport(handler)) as gateway:
+        body = await gateway.models()
+
+    assert [item["id"] for item in body["data"]] == ["Demo-Model-B", "demo-glm"]
+    for item in body["data"]:
+        assert "max_model_len" not in item
+        assert "context_length" not in item
+
+
+@pytest.mark.parametrize(
+    "response",
+    [
+        httpx.Response(500, text="boom"),
+        httpx.Response(200, text="not json"),
+        httpx.Response(200, json=["not", "a", "mapping"]),
+        httpx.Response(200, json={"object": "list", "data": "not a list"}),
+        httpx.Response(200, json={"object": "list", "data": [{"id": "Demo-Model-B"}]}),
+        httpx.Response(
+            200, json={"object": "list", "data": [{"id": "Demo-Model-B", "max_model_len": True}]}
+        ),
+        httpx.Response(
+            200, json={"object": "list", "data": [{"id": "Demo-Model-B", "max_model_len": 0}]}
+        ),
+    ],
+)
+async def test_models_omits_context_for_bad_upstream_payload(db, response):
+    add_deployment(db)
+
+    def handler(request):
+        return response
+
+    async with FleetGateway(db, transport=httpx.MockTransport(handler)) as gateway:
+        body = await gateway.models()
+
+    assert [item["id"] for item in body["data"]] == ["Demo-Model-B", "demo-glm"]
+    for item in body["data"]:
+        assert "max_model_len" not in item
+        assert "context_length" not in item
+
+
+async def test_models_caches_upstream_context_lookups(db):
+    add_deployment(db)
+    calls = []
+
+    def handler(request):
+        calls.append(str(request.url))
+        return httpx.Response(
+            200,
+            json={"object": "list", "data": [{"id": "Demo-Model-B", "max_model_len": 262144}]},
+        )
+
+    async with FleetGateway(db, transport=httpx.MockTransport(handler)) as gateway:
+        first = await gateway.models()
+        second = await gateway.models()
+
+    assert len(calls) == 1
+    assert {item["max_model_len"] for item in first["data"]} == {262144}
+    assert {item["max_model_len"] for item in second["data"]} == {262144}
 
 
 async def test_proxy_rewrites_model_and_records_usage(db):

@@ -9,15 +9,17 @@ deployments return 503 with a retry hint, and duplicate aliases are rejected.
 Requests are forwarded to the upstream inference server with the model field
 rewritten when needed; streaming responses pass through while usage is parsed
 from JSON or final SSE chunks and accumulated for periodic flushing into the
-metrics store.
+metrics store. The model listing reports each loaded model's context limit from
+the recipe, falling back to the upstream server's model card.
 """
 
 from __future__ import annotations
 
+import asyncio
 import json
 import sqlite3
 import time
-from collections.abc import AsyncIterator, Mapping
+from collections.abc import AsyncIterator, Iterable, Mapping
 from dataclasses import dataclass
 from typing import Any
 
@@ -28,6 +30,8 @@ from spark_fleet.shared.db import Database
 from spark_fleet.shared.recipe import RecipeError, parse_recipe
 
 LOADING_STATUSES = frozenset({"pending", "loading", "starting"})
+UPSTREAM_CONTEXT_TIMEOUT_SECONDS = 2.0
+UPSTREAM_CONTEXT_CACHE_TTL_SECONDS = 30.0
 _STRIP_REQUEST = frozenset(
     {
         "authorization",
@@ -90,6 +94,7 @@ class Route:
     aliases: frozenset[str]
     upstream_url: str
     status: str
+    context_length: int | None = None
 
 
 @dataclass
@@ -188,6 +193,7 @@ class FleetGateway:
         self._db = db
         self._client = httpx.AsyncClient(timeout=timeout, transport=transport)
         self.counters = InferenceCounters()
+        self._context_cache: dict[tuple[str, str], tuple[float, int | None]] = {}
 
     async def aclose(self) -> None:
         await self._client.aclose()
@@ -238,6 +244,9 @@ class FleetGateway:
                 aliases=frozenset(aliases),
                 upstream_url=f"http://{node['lan_ip']}:{head.inference_port}",
                 status="loaded" if status == "loaded" else "loading",
+                context_length=(
+                    recipe.spec.model.context_length if recipe.spec.model else None
+                ),
             )
             for alias in aliases:
                 existing = routes.get(alias)
@@ -260,6 +269,7 @@ class FleetGateway:
                 aliases=primary.aliases | {"spark-active"},
                 upstream_url=primary.upstream_url,
                 status="loading" if primary_loading else "loaded",
+                context_length=primary.context_length,
             )
         return routes
 
@@ -279,26 +289,101 @@ class FleetGateway:
             raise ModelLoading(model)
         return route
 
-    def models(self) -> dict[str, Any]:
+    async def models(self) -> dict[str, Any]:
         routes = self.routing_table()
-        ids: set[str] = set()
+        loaded: dict[str, Route] = {}
         for route in routes.values():
-            if route.status != "loaded":
-                continue
-            ids.add(route.served_name)
-            ids.update(route.aliases)
-        return {
-            "object": "list",
-            "data": [
-                {
-                    "id": model_id,
-                    "object": "model",
-                    "created": 0,
-                    "owned_by": "spark-fleet",
-                }
-                for model_id in sorted(ids)
-            ],
-        }
+            if route.status == "loaded":
+                loaded[route.deployment_id] = route
+        contexts = await self._upstream_context_lengths(loaded.values())
+        entries: dict[str, int | None] = {}
+        for route in loaded.values():
+            context = route.context_length
+            if context is None:
+                context = contexts.get((route.upstream_url, route.served_name))
+            for model_id in route.aliases:
+                entries.setdefault(model_id, context)
+        data: list[dict[str, Any]] = []
+        for model_id in sorted(entries):
+            item: dict[str, Any] = {
+                "id": model_id,
+                "object": "model",
+                "created": 0,
+                "owned_by": "spark-fleet",
+            }
+            context = entries[model_id]
+            if context is not None:
+                item["max_model_len"] = context
+                item["context_length"] = context
+            data.append(item)
+        return {"object": "list", "data": data}
+
+    async def _upstream_context_lengths(
+        self, routes: Iterable[Route]
+    ) -> dict[tuple[str, str], int]:
+        keys = sorted(
+            {
+                (route.upstream_url, route.served_name)
+                for route in routes
+                if route.context_length is None
+            }
+        )
+        if not keys:
+            return {}
+        now = time.monotonic()
+        results: dict[tuple[str, str], int] = {}
+        pending: list[tuple[str, str]] = []
+        for key in keys:
+            cached = self._context_cache.get(key)
+            if cached is not None and now - cached[0] < UPSTREAM_CONTEXT_CACHE_TTL_SECONDS:
+                if cached[1] is not None:
+                    results[key] = cached[1]
+            else:
+                pending.append(key)
+        if not pending:
+            return results
+        fetched = await asyncio.gather(
+            *(
+                self._fetch_upstream_context(upstream_url, served_name)
+                for upstream_url, served_name in pending
+            )
+        )
+        for key, value in zip(pending, fetched):
+            self._context_cache[key] = (now, value)
+            if value is not None:
+                results[key] = value
+        return results
+
+    async def _fetch_upstream_context(
+        self, upstream_url: str, served_name: str
+    ) -> int | None:
+        try:
+            response = await self._client.get(
+                f"{upstream_url}/v1/models",
+                timeout=UPSTREAM_CONTEXT_TIMEOUT_SECONDS,
+            )
+        except httpx.HTTPError:
+            return None
+        if response.status_code != 200:
+            return None
+        try:
+            payload = response.json()
+        except ValueError:
+            return None
+        if not isinstance(payload, Mapping):
+            return None
+        data = payload.get("data")
+        if not isinstance(data, list):
+            return None
+        entries = [entry for entry in data if isinstance(entry, Mapping)]
+        matches = [entry for entry in entries if entry.get("id") == served_name]
+        candidates = matches if matches else (entries if len(entries) == 1 else [])
+        for entry in candidates:
+            for key in ("max_model_len", "context_length"):
+                value = entry.get(key)
+                if isinstance(value, int) and not isinstance(value, bool) and value > 0:
+                    return value
+        return None
 
     async def proxy(
         self,

@@ -575,6 +575,27 @@ def test_swap_model_returns_diff_and_applies(env):
     assert "org/new-model" in env.recipes_dir.joinpath("glm.yaml").read_text()
 
 
+def test_swap_model_preserves_context_length(env):
+    add_node(env.client)
+    add_recipe(
+        env,
+        "glm",
+        RECIPE_YAML.replace(
+            "    servedName: GLM",
+            "    servedName: GLM\n    contextLength: 262144",
+        ),
+    )
+
+    response = env.client.post(
+        "/api/recipes/glm/swap-model",
+        json={"repo": "org/new-model", "servedName": "NEW", "apply": True},
+    )
+
+    assert response.status_code == 200
+    assert "contextLength: 262144" in response.json()["yaml"]
+    assert "contextLength: 262144" in env.recipes_dir.joinpath("glm.yaml").read_text()
+
+
 def test_swap_model_rejects_invalid_repo(env):
     add_recipe(env, "glm")
 
@@ -945,6 +966,48 @@ def test_gateway_models_lists_loaded_deployments(env):
     assert response.status_code == 200
     ids = [item["id"] for item in response.json()["data"]]
     assert ids == ["GLM", "glm"]
+
+
+def test_gateway_models_reports_recipe_context_length(env):
+    from spark_fleet.shared.recipe import parse_recipe_yaml
+
+    add_node(env.client)
+    yaml = RECIPE_YAML.replace(
+        "    servedName: GLM",
+        "    servedName: GLM\n    contextLength: 262144",
+    )
+    recipe = parse_recipe_yaml(yaml).model_dump(by_alias=True, exclude_unset=True)
+    add_deployment(env.db, status="loaded", recipe=recipe)
+
+    response = env.client.get("/v1/models")
+
+    assert response.status_code == 200
+    data = response.json()["data"]
+    assert [item["id"] for item in data] == ["GLM", "glm"]
+    for item in data:
+        assert item["max_model_len"] == 262144
+        assert item["context_length"] == 262144
+
+
+def test_gateway_models_falls_back_to_upstream_context(env):
+    add_node(env.client)
+    add_deployment(env.db, status="loaded")
+
+    def handler(request):
+        return httpx.Response(
+            200,
+            json={"object": "list", "data": [{"id": "GLM", "max_model_len": 131072}]},
+        )
+
+    STATE["gateway_handler"] = handler
+
+    response = env.client.get("/v1/models")
+
+    assert response.status_code == 200
+    data = response.json()["data"]
+    assert [item["id"] for item in data] == ["GLM", "glm"]
+    for item in data:
+        assert item["max_model_len"] == 131072
 
 
 def test_gateway_proxy_returns_upstream_response(env):
