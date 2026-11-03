@@ -846,6 +846,48 @@ def test_node_and_inference_metrics(env):
     assert inference["series"][0]["requests"] == 2
 
 
+def test_node_metrics_expose_cache_capacity_and_gpu_compute(env):
+    env.db.upsert_node(
+        "spark-01",
+        display_name="spark-01",
+        lan_ip="192.0.2.239",
+        fabric_ip="198.51.100.10",
+        agent_url="http://192.0.2.239:8092",
+    )
+    env.metrics.record_node_snapshot(
+        "spark-01",
+        {
+            "cache_bytes": 10,
+            "cache_total_bytes": 1000,
+            "cache_free_bytes": 250,
+            "gpus": [
+                {
+                    "index": 0,
+                    "utilization_percent": 95,
+                    "temperature_celsius": 60,
+                    "compute_processes": 1,
+                    "compute_memory_bytes": 512,
+                    "resident": True,
+                }
+            ],
+        },
+        ts=100.0,
+    )
+
+    node = env.client.get("/api/metrics/nodes/spark-01").json()
+
+    assert node["latest"] == {
+        "cache_bytes": 10.0,
+        "cache_total_bytes": 1000.0,
+        "cache_free_bytes": 250.0,
+        "gpu.0.utilization_percent": 95.0,
+        "gpu.0.temperature_celsius": 60.0,
+        "gpu.0.compute_processes": 1.0,
+        "gpu.0.compute_memory_bytes": 512.0,
+        "gpu.0.resident": 1.0,
+    }
+
+
 # Settings -----------------------------------------------------------------
 
 

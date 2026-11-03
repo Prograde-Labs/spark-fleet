@@ -65,6 +65,15 @@ const totalCacheFree = computed(() =>
     0,
   ),
 )
+const cacheCapacityComplete = computed(() => {
+  const values = Object.values(metricsByNode.value)
+  return (
+    totalCacheCapacity.value > 0 &&
+    values
+      .filter((m) => Number(m.cache_bytes || 0) > 0)
+      .every((m) => Number(m.cache_total_bytes || 0) > 0)
+  )
+})
 const onlineNodes = computed(
   () =>
     nodes.value.filter((node) => {
@@ -232,7 +241,7 @@ onBeforeUnmount(() => {
         </div>
         <p class="stat-value mt-2">{{ formatBytes(totalCache) }}</p>
         <p class="mt-1 font-mono text-[10px] text-faint">
-          <template v-if="totalCacheCapacity > 0">
+          <template v-if="cacheCapacityComplete">
             of {{ formatBytes(totalCacheCapacity) }} · {{ formatBytes(totalCacheFree) }} free
           </template>
           <template v-else>Across all cache roots</template>

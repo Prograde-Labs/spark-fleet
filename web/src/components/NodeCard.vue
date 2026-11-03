@@ -244,18 +244,24 @@ const gpuResident = (gpu) => {
             </span>
           </template>
           <span v-else class="flex-1 font-mono text-[9px] text-faint">
-            GPU memory N/A · unified host memory
+            GPU memory N/A
           </span>
         </div>
         <p
-          v-if="gpu.compute_memory_bytes !== null && gpu.compute_memory_bytes !== undefined"
+          v-if="
+            (gpu.compute_memory_bytes !== null && gpu.compute_memory_bytes !== undefined) ||
+            (gpu.compute_processes !== null && gpu.compute_processes !== undefined)
+          "
           class="mt-1 font-mono text-[9px] text-faint"
         >
-          {{ formatBytes(gpu.compute_memory_bytes) }} in compute apps
-          <span v-if="gpu.compute_processes !== null && gpu.compute_processes !== undefined">
-            · {{ gpu.compute_processes }}
+          <template v-if="gpu.compute_memory_bytes !== null && gpu.compute_memory_bytes !== undefined">
+            {{ formatBytes(gpu.compute_memory_bytes) }} in compute apps
+          </template>
+          <template v-if="gpu.compute_processes !== null && gpu.compute_processes !== undefined">
+            <span v-if="gpu.compute_memory_bytes !== null && gpu.compute_memory_bytes !== undefined"> · </span>
+            {{ gpu.compute_processes }}
             process{{ Number(gpu.compute_processes) === 1 ? '' : 'es' }}
-          </span>
+          </template>
         </p>
       </div>
     </div>
