@@ -14,6 +14,7 @@ import {
   gpuMemoryKnown,
   gpuResident,
   groupGpus,
+  telemetryState,
 } from './metrics.js'
 
 test('gpuResident is tri-state', () => {
@@ -68,6 +69,15 @@ test('cachePercent scales cache bytes to filesystem capacity', () => {
   assert.equal(cachePercent({ cache_bytes: 250 }), 0)
 })
 
+test('telemetryState distinguishes ok, unavailable, and disabled', () => {
+  assert.equal(telemetryState({ host_total_bytes: 1 }, true), 'ok')
+  assert.equal(telemetryState({}, true), 'unavailable')
+  assert.equal(telemetryState({ fetchFailed: true }, true), 'unavailable')
+  assert.equal(telemetryState(undefined, true), 'unavailable')
+  assert.equal(telemetryState({ host_total_bytes: 1 }, false), 'disabled')
+  assert.equal(telemetryState({}, false), 'disabled')
+})
+
 test('cacheAggregate includes capacity from a node without cache bytes', () => {
   const aggregate = cacheAggregate({
     a: { cache_bytes: 10, cache_total_bytes: 1000, cache_free_bytes: 250 },
@@ -80,6 +90,8 @@ test('cacheAggregate includes capacity from a node without cache bytes', () => {
     free: 1250,
     complete: false,
     reported: 1,
+    capacityReported: 2,
+    freeReported: 2,
   })
 })
 
@@ -95,6 +107,8 @@ test('cacheAggregate ignores a node with no cache telemetry', () => {
     free: 250,
     complete: true,
     reported: 1,
+    capacityReported: 1,
+    freeReported: 1,
   })
 })
 
@@ -110,6 +124,8 @@ test('cacheAggregate is incomplete when a node fetch failed', () => {
     free: 250,
     complete: false,
     reported: 1,
+    capacityReported: 1,
+    freeReported: 1,
   })
 })
 
@@ -143,6 +159,8 @@ test('cacheAggregate includes a zero-byte contributor with capacity', () => {
     free: 1250,
     complete: true,
     reported: 2,
+    capacityReported: 2,
+    freeReported: 2,
   })
 })
 
@@ -158,6 +176,8 @@ test('cacheAggregate sums multiple complete contributors', () => {
     free: 1250,
     complete: true,
     reported: 2,
+    capacityReported: 2,
+    freeReported: 2,
   })
 })
 
@@ -170,6 +190,8 @@ test('cacheAggregate treats a zero-byte contributor without capacity as incomple
   assert.equal(aggregate.complete, false)
   assert.equal(aggregate.used, 10)
   assert.equal(aggregate.reported, 2)
+  assert.equal(aggregate.capacityReported, 1)
+  assert.equal(aggregate.freeReported, 1)
 })
 
 test('cacheAggregate is incomplete when a contributor lacks capacity', () => {
@@ -179,6 +201,8 @@ test('cacheAggregate is incomplete when a contributor lacks capacity', () => {
   })
 
   assert.equal(aggregate.complete, false)
+  assert.equal(aggregate.capacityReported, 1)
+  assert.equal(aggregate.freeReported, 1)
 })
 
 test('cacheAggregate is incomplete when a contributor lacks free space', () => {
@@ -188,6 +212,8 @@ test('cacheAggregate is incomplete when a contributor lacks free space', () => {
   })
 
   assert.equal(aggregate.complete, false)
+  assert.equal(aggregate.capacityReported, 2)
+  assert.equal(aggregate.freeReported, 1)
 })
 
 test('cacheAggregate is incomplete with zero capacity', () => {
@@ -197,6 +223,8 @@ test('cacheAggregate is incomplete with zero capacity', () => {
   })
 
   assert.equal(aggregate.complete, false)
+  assert.equal(aggregate.capacityReported, 2)
+  assert.equal(aggregate.freeReported, 2)
 })
 
 test('cacheAggregate with no nodes is empty and incomplete', () => {
@@ -206,6 +234,8 @@ test('cacheAggregate with no nodes is empty and incomplete', () => {
     free: 0,
     complete: false,
     reported: 0,
+    capacityReported: 0,
+    freeReported: 0,
   })
 })
 
@@ -216,6 +246,8 @@ test('cacheAggregate without an argument is empty and incomplete', () => {
     free: 0,
     complete: false,
     reported: 0,
+    capacityReported: 0,
+    freeReported: 0,
   })
 })
 
@@ -231,6 +263,8 @@ test('cacheAggregate ignores null node entries', () => {
     free: 250,
     complete: true,
     reported: 1,
+    capacityReported: 1,
+    freeReported: 1,
   })
 })
 
@@ -246,6 +280,8 @@ test('cacheAggregate sums a free-only node without completing', () => {
     free: 750,
     complete: false,
     reported: 1,
+    capacityReported: 1,
+    freeReported: 2,
   })
 })
 
@@ -284,9 +320,7 @@ test('cacheCaption distinguishes complete, partial, and unavailable', () => {
     'partial',
   )
   assert.equal(
-    cacheCaption(
-      cacheAggregate({ a: { cache_free_bytes: 250 } }),
-    ),
+    cacheCaption(cacheAggregate({ a: { cache_free_bytes: 250 } })),
     'unavailable',
   )
 })
@@ -323,11 +357,21 @@ test('collectNodeMetrics marks a failed fetch without stale fields', async () =>
   assert.deepEqual(result, { a: { cache_bytes: 1 }, b: { fetchFailed: true } })
 })
 
-test('collectNodeMetrics throws with the first failure as cause', async () => {
+test('collectNodeMetrics throws with the first failure in node order', async () => {
   await assert.rejects(
-    collectNodeMetrics([{ id: 'a', enabled: true }], async () => {
-      throw new Error('auth expired')
-    }),
+    collectNodeMetrics(
+      [
+        { id: 'a', enabled: true },
+        { id: 'b', enabled: true },
+      ],
+      async (node) => {
+        if (node.id === 'a') {
+          await Promise.resolve()
+          throw new Error('auth expired')
+        }
+        throw new Error('timeout')
+      },
+    ),
     (error) =>
       error.message === 'Metrics unavailable for every node' &&
       error.cause.message === 'auth expired',

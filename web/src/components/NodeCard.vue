@@ -14,11 +14,13 @@ import {
 import { formatBytes, formatPercent, formatRelative } from '../format'
 import {
   cacheBarKnown,
+  cacheCapacityKnown,
   cacheKnown as metricsCacheKnown,
   cachePercent,
   gpuMemoryKnown,
   gpuResident,
   groupGpus,
+  telemetryState,
 } from '../metrics'
 
 const props = defineProps({
@@ -45,11 +47,9 @@ const ringOffset = computed(
 const cacheTotal = computed(() => props.metrics.cache_total_bytes)
 const cacheFree = computed(() => props.metrics.cache_free_bytes)
 const cacheKnown = computed(() => metricsCacheKnown(props.metrics))
+const cacheCapacity = computed(() => cacheCapacityKnown(props.metrics))
 const cacheBar = computed(() => cacheBarKnown(props.metrics))
-const hasTelemetry = computed(
-  () =>
-    !props.metrics.fetchFailed && Object.keys(props.metrics || {}).length > 0,
-)
+const telemetry = computed(() => telemetryState(props.metrics, props.node.enabled))
 const cacheBarPercent = computed(() => cachePercent(props.metrics))
 const containerPercent = computed(() =>
   total.value > 0
@@ -113,7 +113,7 @@ const gpuPercent = (gpu, key) => {
       </button>
     </header>
 
-    <div v-if="hasTelemetry" class="mt-5 grid grid-cols-[112px_1fr] items-center gap-4">
+    <div v-if="telemetry === 'ok'" class="mt-5 grid grid-cols-[112px_1fr] items-center gap-4">
       <div class="relative grid h-[112px] w-[112px] place-items-center">
         <svg viewBox="0 0 112 112" class="absolute inset-0 -rotate-90">
           <circle cx="56" cy="56" :r="RADIUS" fill="none" stroke="#1d2637" stroke-width="7" />
@@ -180,6 +180,7 @@ const gpuPercent = (gpu, key) => {
             <template v-if="cacheKnown">
               Filesystem {{ formatBytes(cacheFree) }} free of {{ formatBytes(cacheTotal) }}
             </template>
+            <template v-else-if="cacheCapacity">Free space unavailable</template>
             <template v-else>Capacity unavailable</template>
           </p>
           <p class="mt-0.5 font-mono text-[9px] text-faint">
@@ -194,7 +195,7 @@ const gpuPercent = (gpu, key) => {
       v-else
       class="mt-5 rounded-md border border-edge/70 bg-void/40 px-3 py-3 font-mono text-[10px] text-faint"
     >
-      Telemetry unavailable
+      {{ telemetry === 'disabled' ? 'Not collected (node disabled)' : 'Telemetry unavailable' }}
     </div>
 
     <div v-if="gpus.length" class="mt-4 space-y-2">

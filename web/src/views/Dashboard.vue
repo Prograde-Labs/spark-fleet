@@ -59,8 +59,11 @@ const onlineNodes = computed(
 )
 const liveEvents = computed(() => eventState.events.slice(0, 40))
 
-async function load() {
-  if (inflight) return inflight
+async function load({ force = false } = {}) {
+  if (inflight) {
+    if (!force) return inflight
+    await inflight
+  }
   inflight = (async () => {
     refreshing.value = true
     error.value = null
@@ -73,8 +76,12 @@ async function load() {
       deployments.value = deploymentResponse.deployments || []
       await loadMetrics()
     } catch (exc) {
+      nodes.value = []
+      deployments.value = []
       metricsByNode.value = {}
-      error.value = exc.message || String(exc)
+      error.value = exc.cause?.message
+        ? `${exc.message} (${exc.cause.message})`
+        : exc.message || String(exc)
     } finally {
       loading.value = false
       refreshing.value = false
@@ -109,7 +116,7 @@ async function makePrimary(item) {
   try {
     await api.deployments.setPrimary(item.deployment.id)
     notice.value = `${item.deployment.name} is now spark-active`
-    await load()
+    await load({ force: true })
   } catch (exc) {
     notice.value = exc.message || String(exc)
   } finally {
@@ -220,7 +227,9 @@ onBeforeUnmount(() => {
             of {{ formatBytes(cacheTotals.capacity) }} · {{ formatBytes(cacheTotals.free) }} free
           </template>
           <template v-else-if="cacheCaption(cacheTotals) === 'partial'">
-            <template v-if="cacheTotals.capacity > 0">
+            <template
+              v-if="cacheTotals.capacityReported > 0 && cacheTotals.freeReported > 0"
+            >
               of {{ formatBytes(cacheTotals.capacity) }} · {{ formatBytes(cacheTotals.free) }} free · partial
             </template>
             <template v-else>Across reporting cache roots</template>

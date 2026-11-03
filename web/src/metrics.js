@@ -56,25 +56,31 @@ export function cacheBarKnown(metrics) {
 
 export async function collectNodeMetrics(nodes, fetchLatest) {
   const targets = (nodes || []).filter((node) => node.enabled)
-  let failures = 0
-  let firstError = null
-  const entries = await Promise.all(
+  const results = await Promise.all(
     targets.map(async (node) => {
       try {
-        return [node.id, await fetchLatest(node)]
+        return { entry: [node.id, await fetchLatest(node)], error: null }
       } catch (exc) {
-        failures += 1
-        if (!firstError) firstError = exc
-        return [node.id, { fetchFailed: true }]
+        return { entry: [node.id, { fetchFailed: true }], error: exc }
       }
     }),
   )
+  const errors = results.map((result) => result.error)
+  const failures = errors.filter(Boolean).length
   if (targets.length > 0 && failures === targets.length) {
     const error = new Error('Metrics unavailable for every node')
-    error.cause = firstError
+    error.cause = errors.find(Boolean)
     throw error
   }
-  return Object.fromEntries(entries)
+  return Object.fromEntries(results.map((result) => result.entry))
+}
+
+export function telemetryState(metrics, enabled) {
+  if (enabled === false) return 'disabled'
+  if (!metrics || metrics.fetchFailed || Object.keys(metrics).length === 0) {
+    return 'unavailable'
+  }
+  return 'ok'
 }
 
 export function groupGpus(metrics) {
@@ -98,6 +104,12 @@ export function cacheAggregate(metricsByNode) {
     reported(metrics.cache_free_bytes)
   const reportedNodes = counted.filter((metrics) =>
     reported(metrics.cache_bytes),
+  ).length
+  const capacityNodes = counted.filter((metrics) =>
+    reported(metrics.cache_total_bytes),
+  ).length
+  const freeNodes = counted.filter((metrics) =>
+    reported(metrics.cache_free_bytes),
   ).length
   const used = counted.reduce(
     (sum, metrics) =>
@@ -130,5 +142,13 @@ export function cacheAggregate(metricsByNode) {
         reported(metrics.cache_free_bytes)
       )
     })
-  return { used, capacity, free, complete, reported: reportedNodes }
+  return {
+    used,
+    capacity,
+    free,
+    complete,
+    reported: reportedNodes,
+    capacityReported: capacityNodes,
+    freeReported: freeNodes,
+  }
 }
