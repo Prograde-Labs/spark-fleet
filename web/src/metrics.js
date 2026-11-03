@@ -49,6 +49,7 @@ export function cacheAggregate(metricsByNode) {
     contributors.every(
       (metrics) =>
         reported(metrics.cache_total_bytes) &&
+        Number(metrics.cache_total_bytes) > 0 &&
         reported(metrics.cache_free_bytes),
     )
   return { used, capacity, free, complete }

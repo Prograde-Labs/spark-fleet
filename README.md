@@ -84,7 +84,7 @@ uv run pytest -v
 uv run ruff check .
 uv run ruff format --check .
 
-cd web && npm ci && npm run build
+cd web && npm ci && npm test && npm run build
 ```
 
 Static Compose validation:

@@ -9,6 +9,7 @@ WORKDIR /app/web
 COPY web/package.json web/package-lock.json ./
 RUN npm ci --no-audit --no-fund
 COPY web/ ./
+RUN npm test
 RUN npm run build
 
 # --- Python wheel ----------------------------------------------------------

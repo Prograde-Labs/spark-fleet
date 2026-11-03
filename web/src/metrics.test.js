@@ -51,7 +51,35 @@ test('cacheAggregate excludes nodes without cache bytes', () => {
   })
 })
 
-test('cacheAggregate treats a reported zero as a contributor', () => {
+test('cacheAggregate includes a zero-byte contributor with capacity', () => {
+  const aggregate = cacheAggregate({
+    a: { cache_bytes: 10, cache_total_bytes: 1000, cache_free_bytes: 250 },
+    b: { cache_bytes: 0, cache_total_bytes: 4000, cache_free_bytes: 1000 },
+  })
+
+  assert.deepEqual(aggregate, {
+    used: 10,
+    capacity: 5000,
+    free: 1250,
+    complete: true,
+  })
+})
+
+test('cacheAggregate sums multiple complete contributors', () => {
+  const aggregate = cacheAggregate({
+    a: { cache_bytes: 10, cache_total_bytes: 1000, cache_free_bytes: 250 },
+    b: { cache_bytes: 5, cache_total_bytes: 4000, cache_free_bytes: 1000 },
+  })
+
+  assert.deepEqual(aggregate, {
+    used: 15,
+    capacity: 5000,
+    free: 1250,
+    complete: true,
+  })
+})
+
+test('cacheAggregate treats a zero-byte contributor without capacity as incomplete', () => {
   const aggregate = cacheAggregate({
     a: { cache_bytes: 10, cache_total_bytes: 1000, cache_free_bytes: 250 },
     b: { cache_bytes: 0 },
@@ -65,6 +93,24 @@ test('cacheAggregate is incomplete when a contributor lacks capacity', () => {
   const aggregate = cacheAggregate({
     a: { cache_bytes: 10, cache_total_bytes: 1000, cache_free_bytes: 250 },
     b: { cache_bytes: 5 },
+  })
+
+  assert.equal(aggregate.complete, false)
+})
+
+test('cacheAggregate is incomplete when a contributor lacks free space', () => {
+  const aggregate = cacheAggregate({
+    a: { cache_bytes: 10, cache_total_bytes: 1000, cache_free_bytes: 250 },
+    b: { cache_bytes: 5, cache_total_bytes: 4000 },
+  })
+
+  assert.equal(aggregate.complete, false)
+})
+
+test('cacheAggregate is incomplete with zero capacity', () => {
+  const aggregate = cacheAggregate({
+    a: { cache_bytes: 10, cache_total_bytes: 1000, cache_free_bytes: 250 },
+    b: { cache_bytes: 0, cache_total_bytes: 0, cache_free_bytes: 0 },
   })
 
   assert.equal(aggregate.complete, false)
