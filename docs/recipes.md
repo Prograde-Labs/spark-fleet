@@ -35,7 +35,8 @@ spec:
 
 `contextLength` is metadata reported by the gateway's `/v1/models` context
 limit; it does not change the rendered serving command. Leave it unset to let
-the gateway query the upstream server's model card.
+the gateway query the upstream server's model card: it reads vLLM's
+`max_model_len`/`context_length`, then llama.cpp's `meta.n_ctx`/`meta.n_ctx_train`.
 
 ## Roles
 

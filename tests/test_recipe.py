@@ -14,6 +14,22 @@ from spark_fleet.shared.recipe import (
     validate_against_nodes,
 )
 
+ROOT = Path(__file__).resolve().parents[1]
+
+SHIPPED_CONTEXT_LENGTHS = {
+    "ds4-flash": 1048576,
+    "demo-heavy": 524288,
+    "demo-glm": 850000,
+    "demo-glm-xl": 960000,
+    "demo-qwen": 262144,
+    "demo-qwen-dflash2": 262144,
+    "demo-qwen-heretic": 262144,
+    "demo-qwen-sglang": 262144,
+    "demo-qwen-sglang-dflash2": 262144,
+    "demo-qwen-sglang-plain": 262144,
+    "demo-qwen-sglang-plain-radixark": 262144,
+}
+
 DEPLOYMENT = {
     "apiVersion": "spark-fleet/v1",
     "kind": "Recipe",
@@ -195,6 +211,21 @@ def test_model_context_length_rejects_invalid_values(value):
 
     with pytest.raises(RecipeError, match=r"spec\.model\.contextLength"):
         parse_recipe(data)
+
+
+@pytest.mark.parametrize("name,expected", sorted(SHIPPED_CONTEXT_LENGTHS.items()))
+def test_shipped_recipes_declare_expected_context_length(name, expected):
+    recipe = load_recipe_file(ROOT / "recipes" / f"{name}.yaml")
+
+    assert recipe.spec.model is not None
+    assert recipe.spec.model.context_length == expected
+
+
+def test_shipped_llamacpp_recipe_relies_on_upstream_context():
+    recipe = load_recipe_file(ROOT / "recipes" / "demo-llamacpp.yaml")
+
+    assert recipe.spec.model is not None
+    assert recipe.spec.model.context_length is None
 
 
 def test_load_recipe_file(tmp_path):

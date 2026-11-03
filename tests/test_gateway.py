@@ -276,6 +276,57 @@ async def test_models_falls_back_to_upstream_context_length(db):
     assert {item["max_model_len"] for item in body["data"]} == {850000}
 
 
+async def test_models_falls_back_to_llamacpp_meta_n_ctx(db):
+    add_deployment(db, served_name="Demo-Model-B")
+
+    def handler(request):
+        return httpx.Response(
+            200,
+            json={
+                "object": "list",
+                "data": [
+                    {
+                        "id": "Demo-Model-B",
+                        "object": "model",
+                        "owned_by": "llamacpp",
+                        "meta": {"n_ctx": 32768, "n_ctx_train": 131072},
+                    }
+                ],
+            },
+        )
+
+    async with FleetGateway(db, transport=httpx.MockTransport(handler)) as gateway:
+        body = await gateway.models()
+
+    assert {item["max_model_len"] for item in body["data"]} == {32768}
+    assert {item["context_length"] for item in body["data"]} == {32768}
+
+
+async def test_models_falls_back_to_llamacpp_meta_n_ctx_train(db):
+    add_deployment(db, served_name="Demo-Model-B")
+
+    def handler(request):
+        return httpx.Response(
+            200,
+            json={
+                "object": "list",
+                "data": [
+                    {
+                        "id": "Demo-Model-B",
+                        "object": "model",
+                        "owned_by": "llamacpp",
+                        "meta": {"n_ctx_train": 131072},
+                    }
+                ],
+            },
+        )
+
+    async with FleetGateway(db, transport=httpx.MockTransport(handler)) as gateway:
+        body = await gateway.models()
+
+    assert {item["max_model_len"] for item in body["data"]} == {131072}
+
+
 async def test_models_falls_back_to_single_upstream_entry(db):
     add_deployment(db, served_name="Demo-Model-B")
 

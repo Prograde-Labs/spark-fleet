@@ -62,13 +62,17 @@ def test_agent_compose_has_narrow_mounts_and_no_extra_privileges():
     # Host PID is required for nvidia-smi/NVML compute-app visibility on GB10.
     assert service["pid"] == "host"
     volumes = service.get("volumes", [])
-    assert "/var/run/docker.sock:/var/run/docker.sock" in volumes
-    assert any("/var/lib/spark-fleet-agent" in volume for volume in volumes)
-    assert any("/srv/spark-fleet/hub" in volume for volume in volumes)
+    assert set(volumes) == {
+        "/var/run/docker.sock:/var/run/docker.sock",
+        "${SPARK_FLEET_AGENT_DATA_HOST_DIR:-./agent-data}:/var/lib/spark-fleet-agent",
+        "${SPARK_FLEET_MODEL_CACHE_HOST_DIR:-/srv/spark-fleet/hub}:/srv/spark-fleet/hub",
+    }
 
     forbidden = {
         "privileged",
         "ipc",
+        "uts",
+        "cgroup",
         "devices",
         "userns_mode",
     }

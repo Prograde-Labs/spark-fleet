@@ -400,6 +400,14 @@ class FleetGateway:
                 value = entry.get(key)
                 if isinstance(value, int) and not isinstance(value, bool) and value > 0:
                     return value
+            # llama.cpp exposes its serving context under ``meta`` instead of
+            # the vLLM-style top-level keys.
+            meta = entry.get("meta")
+            if isinstance(meta, Mapping):
+                for key in ("n_ctx", "n_ctx_train"):
+                    value = meta.get(key)
+                    if isinstance(value, int) and not isinstance(value, bool) and value > 0:
+                        return value
         return None
 
     async def proxy(
