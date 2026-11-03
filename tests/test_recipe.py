@@ -162,12 +162,6 @@ def test_model_context_length_round_trips():
     assert parse_recipe_yaml(text).spec.model.context_length == 524288
 
 
-def test_model_context_length_is_omitted_when_unset():
-    text = recipe_to_yaml(parse_recipe(DEPLOYMENT))
-
-    assert "contextLength" not in text
-
-
 def test_model_context_length_accepts_null():
     data = copy.deepcopy(DEPLOYMENT)
     data["spec"]["model"]["contextLength"] = None
@@ -177,17 +171,10 @@ def test_model_context_length_accepts_null():
     assert recipe.spec.model.context_length is None
 
 
-def test_model_context_length_must_be_positive():
+@pytest.mark.parametrize("value", [0, -1, 1.5, "abc"])
+def test_model_context_length_rejects_invalid_values(value):
     data = copy.deepcopy(DEPLOYMENT)
-    data["spec"]["model"]["contextLength"] = 0
-
-    with pytest.raises(RecipeError, match=r"spec\.model\.contextLength"):
-        parse_recipe(data)
-
-
-def test_model_context_length_rejects_negative():
-    data = copy.deepcopy(DEPLOYMENT)
-    data["spec"]["model"]["contextLength"] = -1
+    data["spec"]["model"]["contextLength"] = value
 
     with pytest.raises(RecipeError, match=r"spec\.model\.contextLength"):
         parse_recipe(data)

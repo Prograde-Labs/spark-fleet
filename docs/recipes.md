@@ -22,7 +22,7 @@ spec:
     servedName: Demo-Model-B
     revision: null
     extraRepos: []
-    contextLength: 262144       # optional serving context limit
+    contextLength: 262144       # optional serving context limit in tokens
   gateway:
     aliases: [demo-glm]           # must be unique among loaded deployments
   topology:

@@ -168,10 +168,16 @@ function normalizeNumbers() {
     if (role.readiness.port === '') delete role.readiness.port
   }
   if (spec.model) {
-    if (spec.model.contextLength === '' || spec.model.contextLength === null) {
+    const raw = spec.model.contextLength
+    if (raw === '') {
       delete spec.model.contextLength
-    } else {
-      spec.model.contextLength = Number(spec.model.contextLength)
+    } else if (raw !== undefined && raw !== null) {
+      const value = Number(raw)
+      if (Number.isFinite(value)) {
+        spec.model.contextLength = value
+      } else {
+        delete spec.model.contextLength
+      }
     }
   }
 }

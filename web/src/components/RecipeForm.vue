@@ -206,7 +206,8 @@ function setReadinessType(role, type) {
             min="1"
             placeholder="auto"
           />
-        </div>        <div>
+        </div>
+        <div>
           <label class="hud-label">Extra repos (one per line)</label>
           <textarea
             class="input mt-1 h-20"
