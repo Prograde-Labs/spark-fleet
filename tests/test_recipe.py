@@ -178,7 +178,17 @@ def test_model_context_length_is_omitted_when_unset():
     assert "contextLength" not in recipe_to_yaml(recipe)
 
 
-@pytest.mark.parametrize("value", [0, -1, 1.5, "abc", True])
+@pytest.mark.parametrize("value,expected", [("4096", 4096), (4096.0, 4096)])
+def test_model_context_length_accepts_integer_forms(value, expected):
+    data = copy.deepcopy(DEPLOYMENT)
+    data["spec"]["model"]["contextLength"] = value
+
+    recipe = parse_recipe(data)
+
+    assert recipe.spec.model.context_length == expected
+
+
+@pytest.mark.parametrize("value", [0, -1, 1.5, "abc", True, False])
 def test_model_context_length_rejects_invalid_values(value):
     data = copy.deepcopy(DEPLOYMENT)
     data["spec"]["model"]["contextLength"] = value
