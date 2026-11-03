@@ -81,9 +81,10 @@ flag, and apply the rollback policy: `restore` reloads displaced deployments,
 ## Telemetry and state
 
 - Agents expose `/metrics` with host memory, managed-container memory, cache
-  bytes, and per-GPU values when `nvidia-smi` is available. The packaged agent
-  requests `gpus: all`, which requires the NVIDIA container toolkit on the node;
-  without it, GPU collection degrades to an error entry.
+  bytes and cache filesystem capacity/free space, and per-GPU values when
+  `nvidia-smi` is available. The packaged agent requests `gpus: all`, which
+  requires the NVIDIA container toolkit on the node; without it, GPU collection
+  degrades to an error entry.
 - The controller polls nodes and metrics on configured intervals, writes series
   to SQLite, prunes by retention (24h default at 10s), and incrementally vacuums.
 - Gateway counters flush into inference samples: request/error counts, latency,

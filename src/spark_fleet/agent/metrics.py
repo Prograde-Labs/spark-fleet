@@ -433,16 +433,19 @@ def collect_metrics(
         errors["containers"] = str(exc)
     container_memory_bytes = sum(info.memory_usage or 0 for info in container_list)
 
+    bytes_failed = False
     if cache_sampler is not None:
         try:
             cache_bytes = cache_sampler()
         except Exception as exc:
             cache_bytes = None
             cache_errors.append(_error_text(exc))
+            bytes_failed = True
     else:
         cache_bytes, cache_error = cache_disk_usage(cache_roots)
         if cache_error:
             cache_errors.append(cache_error)
+            bytes_failed = True
 
     if cache_usage_sampler is not None:
         try:
@@ -456,9 +459,10 @@ def collect_metrics(
         )
     if usage_error:
         cache_errors.append(usage_error)
-    if cache_bytes is None and not cache_errors:
+    if cache_bytes is None and not bytes_failed:
         cache_errors.append("cache bytes unavailable")
     if cache_total_bytes is None or cache_free_bytes is None:
+        cache_total_bytes, cache_free_bytes = None, None
         if not usage_error:
             cache_errors.append("cache capacity unknown")
     if cache_errors:

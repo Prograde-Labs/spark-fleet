@@ -916,6 +916,14 @@ def test_cache_filesystem_usage_caps_root_prefix(tmp_path):
     assert error.count("... and 2 more") == 2
 
 
+def test_cache_filesystem_usage_uses_default_disk_usage(tmp_path):
+    total, free, error = cache_filesystem_usage([tmp_path])
+
+    assert error is None
+    assert total > 0
+    assert 0 <= free <= total
+
+
 def test_cache_filesystem_usage_keeps_five_errors_without_suffix(tmp_path):
     roots = [tmp_path / f"root-{index}" for index in range(5)]
 
@@ -1148,6 +1156,38 @@ def test_collect_metrics_reports_unknown_cache_bytes_without_error_text(tmp_path
 
     assert snapshot.cache_bytes is None
     assert "cache bytes unavailable" in snapshot.errors["cache"]
+
+
+def test_collect_metrics_nulls_half_known_capacity(tmp_path):
+    snapshot = collect_metrics(
+        [tmp_path / "hub"],
+        meminfo_path=write_meminfo(tmp_path),
+        container_sampler=lambda: [],
+        cache_sampler=lambda: 500,
+        cache_usage_sampler=lambda: (1000, None, None),
+        gpu_sampler=lambda: ((), None),
+    )
+
+    assert snapshot.cache_total_bytes is None
+    assert snapshot.cache_free_bytes is None
+    assert "cache capacity unknown" in snapshot.errors["cache"]
+
+
+def test_collect_metrics_reports_bytes_and_capacity_errors_together(tmp_path):
+    snapshot = collect_metrics(
+        [tmp_path / "hub"],
+        meminfo_path=write_meminfo(tmp_path),
+        container_sampler=lambda: [],
+        cache_sampler=lambda: None,
+        cache_usage_sampler=lambda: (None, None, "statvfs failed"),
+        gpu_sampler=lambda: ((), None),
+    )
+
+    assert snapshot.cache_bytes is None
+    assert snapshot.cache_total_bytes is None
+    assert snapshot.cache_free_bytes is None
+    assert "cache bytes unavailable" in snapshot.errors["cache"]
+    assert "statvfs failed" in snapshot.errors["cache"]
 
 
 def test_collect_metrics_records_empty_walk_error(tmp_path, monkeypatch):
