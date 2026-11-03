@@ -44,14 +44,37 @@ export function cacheHeadline(aggregate) {
 }
 
 export function cacheCaption(aggregate) {
-  if (
-    aggregate.reported === 0 &&
-    aggregate.capacity === 0 &&
-    aggregate.free === 0
-  ) {
+  if (aggregate.reported === 0 && aggregate.capacity === 0) {
     return 'unavailable'
   }
   return aggregate.complete ? 'complete' : 'partial'
+}
+
+export function cacheBarKnown(metrics) {
+  return cacheBytesKnown(metrics) && cacheCapacityKnown(metrics)
+}
+
+export async function collectNodeMetrics(nodes, fetchLatest) {
+  const targets = (nodes || []).filter((node) => node.enabled)
+  let failures = 0
+  let firstError = null
+  const entries = await Promise.all(
+    targets.map(async (node) => {
+      try {
+        return [node.id, await fetchLatest(node)]
+      } catch (exc) {
+        failures += 1
+        if (!firstError) firstError = exc
+        return [node.id, { fetchFailed: true }]
+      }
+    }),
+  )
+  if (targets.length > 0 && failures === targets.length) {
+    const error = new Error('Metrics unavailable for every node')
+    error.cause = firstError
+    throw error
+  }
+  return Object.fromEntries(entries)
 }
 
 export function groupGpus(metrics) {
@@ -68,26 +91,27 @@ export function groupGpus(metrics) {
 
 export function cacheAggregate(metricsByNode) {
   const entries = Object.values(metricsByNode || {}).filter(Boolean)
+  const counted = entries.filter((metrics) => !metrics.fetchFailed)
   const hasCacheFields = (metrics) =>
     reported(metrics.cache_bytes) ||
     reported(metrics.cache_total_bytes) ||
     reported(metrics.cache_free_bytes)
-  const reportedNodes = entries.filter((metrics) =>
+  const reportedNodes = counted.filter((metrics) =>
     reported(metrics.cache_bytes),
   ).length
-  const used = entries.reduce(
+  const used = counted.reduce(
     (sum, metrics) =>
       reported(metrics.cache_bytes) ? sum + Number(metrics.cache_bytes) : sum,
     0,
   )
-  const capacity = entries.reduce(
+  const capacity = counted.reduce(
     (sum, metrics) =>
       reported(metrics.cache_total_bytes)
         ? sum + Number(metrics.cache_total_bytes)
         : sum,
     0,
   )
-  const free = entries.reduce(
+  const free = counted.reduce(
     (sum, metrics) =>
       reported(metrics.cache_free_bytes)
         ? sum + Number(metrics.cache_free_bytes)

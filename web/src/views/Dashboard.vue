@@ -21,7 +21,7 @@ import {
   statusTone,
 } from '../format'
 import { eventState } from '../stores/events'
-import { cacheAggregate, cacheCaption, cacheHeadline } from '../metrics'
+import { cacheAggregate, cacheCaption, cacheHeadline, collectNodeMetrics } from '../metrics'
 import NodeCard from '../components/NodeCard.vue'
 import Topology from '../components/Topology.vue'
 
@@ -38,6 +38,7 @@ const now = ref(Date.now())
 
 let timer = null
 let ticker = null
+let inflight = null
 
 const loadedDeployments = computed(() =>
   deployments.value.filter((item) => item.deployment.status === 'loaded'),
@@ -59,43 +60,35 @@ const onlineNodes = computed(
 const liveEvents = computed(() => eventState.events.slice(0, 40))
 
 async function load() {
-  if (refreshing.value) return
-  refreshing.value = true
-  error.value = null
-  try {
-    const [nodeResponse, deploymentResponse] = await Promise.all([
-      api.nodes.list(),
-      api.deployments.list(),
-    ])
-    nodes.value = nodeResponse.nodes || []
-    deployments.value = deploymentResponse.deployments || []
-    await loadMetrics()
-  } catch (exc) {
-    error.value = exc.message || String(exc)
-  } finally {
-    loading.value = false
-    refreshing.value = false
-  }
+  if (inflight) return inflight
+  inflight = (async () => {
+    refreshing.value = true
+    error.value = null
+    try {
+      const [nodeResponse, deploymentResponse] = await Promise.all([
+        api.nodes.list(),
+        api.deployments.list(),
+      ])
+      nodes.value = nodeResponse.nodes || []
+      deployments.value = deploymentResponse.deployments || []
+      await loadMetrics()
+    } catch (exc) {
+      metricsByNode.value = {}
+      error.value = exc.message || String(exc)
+    } finally {
+      loading.value = false
+      refreshing.value = false
+      inflight = null
+    }
+  })()
+  return inflight
 }
 
 async function loadMetrics() {
-  const targets = nodes.value.filter((node) => node.enabled)
-  let failures = 0
-  const entries = await Promise.all(
-    targets.map(async (node) => {
-      try {
-        const response = await api.metrics.node(node.id, { limit: 1 })
-        return [node.id, response.latest || {}]
-      } catch {
-        failures += 1
-        return [node.id, { fetchFailed: true }]
-      }
-    }),
-  )
-  metricsByNode.value = Object.fromEntries(entries)
-  if (targets.length > 0 && failures === targets.length) {
-    throw new Error('Metrics unavailable for every node')
-  }
+  metricsByNode.value = await collectNodeMetrics(nodes.value, async (node) => {
+    const response = await api.metrics.node(node.id, { limit: 1 })
+    return response.latest || {}
+  })
 }
 
 async function checkNode(node) {
@@ -226,7 +219,12 @@ onBeforeUnmount(() => {
           <template v-if="cacheCaption(cacheTotals) === 'complete'">
             of {{ formatBytes(cacheTotals.capacity) }} · {{ formatBytes(cacheTotals.free) }} free
           </template>
-          <template v-else-if="cacheCaption(cacheTotals) === 'partial'">Across reporting cache roots</template>
+          <template v-else-if="cacheCaption(cacheTotals) === 'partial'">
+            <template v-if="cacheTotals.capacity > 0">
+              of {{ formatBytes(cacheTotals.capacity) }} · {{ formatBytes(cacheTotals.free) }} free · partial
+            </template>
+            <template v-else>Across reporting cache roots</template>
+          </template>
           <template v-else>Cache telemetry unavailable</template>
         </p>
       </div>
@@ -238,7 +236,7 @@ onBeforeUnmount(() => {
     >
       <WifiOff class="h-4 w-4 text-danger" />
       <p class="font-mono text-xs text-danger">{{ error }}</p>
-      <button class="btn ml-auto" @click="load">Retry</button>
+      <button class="btn ml-auto" :disabled="refreshing" @click="load">Retry</button>
     </div>
     <div
       v-else-if="notice"

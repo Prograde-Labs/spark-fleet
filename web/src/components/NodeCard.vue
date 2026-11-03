@@ -13,7 +13,7 @@ import {
 } from 'lucide-vue-next'
 import { formatBytes, formatPercent, formatRelative } from '../format'
 import {
-  cacheBytesKnown,
+  cacheBarKnown,
   cacheKnown as metricsCacheKnown,
   cachePercent,
   gpuMemoryKnown,
@@ -45,7 +45,11 @@ const ringOffset = computed(
 const cacheTotal = computed(() => props.metrics.cache_total_bytes)
 const cacheFree = computed(() => props.metrics.cache_free_bytes)
 const cacheKnown = computed(() => metricsCacheKnown(props.metrics))
-const cacheBytes = computed(() => cacheBytesKnown(props.metrics))
+const cacheBar = computed(() => cacheBarKnown(props.metrics))
+const hasTelemetry = computed(
+  () =>
+    !props.metrics.fetchFailed && Object.keys(props.metrics || {}).length > 0,
+)
 const cacheBarPercent = computed(() => cachePercent(props.metrics))
 const containerPercent = computed(() =>
   total.value > 0
@@ -109,7 +113,7 @@ const gpuPercent = (gpu, key) => {
       </button>
     </header>
 
-    <div class="mt-5 grid grid-cols-[112px_1fr] items-center gap-4">
+    <div v-if="hasTelemetry" class="mt-5 grid grid-cols-[112px_1fr] items-center gap-4">
       <div class="relative grid h-[112px] w-[112px] place-items-center">
         <svg viewBox="0 0 112 112" class="absolute inset-0 -rotate-90">
           <circle cx="56" cy="56" :r="RADIUS" fill="none" stroke="#1d2637" stroke-width="7" />
@@ -166,7 +170,7 @@ const gpuPercent = (gpu, key) => {
             </span>
             <span class="hud-value text-[11px]">{{ formatBytes(metrics.cache_bytes) }}</span>
           </div>
-          <div v-if="cacheBytes" class="mt-1 h-1.5 overflow-hidden rounded-full bg-edge">
+          <div v-if="cacheBar" class="mt-1 h-1.5 overflow-hidden rounded-full bg-edge">
             <div
               class="h-full rounded-full bg-violet/70 transition-all duration-700"
               :style="{ width: `${cacheBarPercent}%` }"
@@ -184,6 +188,13 @@ const gpuPercent = (gpu, key) => {
           </p>
         </div>
       </div>
+    </div>
+
+    <div
+      v-else
+      class="mt-5 rounded-md border border-edge/70 bg-void/40 px-3 py-3 font-mono text-[10px] text-faint"
+    >
+      Telemetry unavailable
     </div>
 
     <div v-if="gpus.length" class="mt-4 space-y-2">

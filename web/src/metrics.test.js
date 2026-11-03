@@ -3,12 +3,14 @@ import test from 'node:test'
 
 import {
   cacheAggregate,
+  cacheBarKnown,
   cacheBytesKnown,
   cacheCaption,
   cacheCapacityKnown,
   cacheHeadline,
   cacheKnown,
   cachePercent,
+  collectNodeMetrics,
   gpuMemoryKnown,
   gpuResident,
   groupGpus,
@@ -50,6 +52,14 @@ test('cacheBytesKnown accepts a reported zero', () => {
   assert.equal(cacheBytesKnown({ cache_bytes: 0 }), true)
   assert.equal(cacheBytesKnown({ cache_bytes: null }), false)
   assert.equal(cacheBytesKnown({}), false)
+})
+
+test('cacheBarKnown requires bytes and positive capacity', () => {
+  assert.equal(cacheBarKnown({ cache_bytes: 10, cache_total_bytes: 1000 }), true)
+  assert.equal(cacheBarKnown({ cache_bytes: 0, cache_total_bytes: 1000 }), true)
+  assert.equal(cacheBarKnown({ cache_bytes: 10 }), false)
+  assert.equal(cacheBarKnown({ cache_total_bytes: 1000 }), false)
+  assert.equal(cacheBarKnown({ cache_bytes: 10, cache_total_bytes: 0 }), false)
 })
 
 test('cachePercent scales cache bytes to filesystem capacity', () => {
@@ -115,8 +125,10 @@ test('cacheAggregate is incomplete when a failed fetch retains cache fields', ()
   })
 
   assert.equal(aggregate.complete, false)
-  assert.equal(aggregate.reported, 2)
-  assert.equal(aggregate.used, 15)
+  assert.equal(aggregate.reported, 1)
+  assert.equal(aggregate.used, 10)
+  assert.equal(aggregate.capacity, 1000)
+  assert.equal(aggregate.free, 250)
 })
 
 test('cacheAggregate includes a zero-byte contributor with capacity', () => {
@@ -270,6 +282,63 @@ test('cacheCaption distinguishes complete, partial, and unavailable', () => {
       cacheAggregate({ a: { cache_total_bytes: 1000, cache_free_bytes: 250 } }),
     ),
     'partial',
+  )
+  assert.equal(
+    cacheCaption(
+      cacheAggregate({ a: { cache_free_bytes: 250 } }),
+    ),
+    'unavailable',
+  )
+})
+
+test('collectNodeMetrics skips disabled nodes', async () => {
+  const calls = []
+  const result = await collectNodeMetrics(
+    [
+      { id: 'a', enabled: true },
+      { id: 'b', enabled: false },
+    ],
+    async (node) => {
+      calls.push(node.id)
+      return { cache_bytes: 1 }
+    },
+  )
+
+  assert.deepEqual(calls, ['a'])
+  assert.deepEqual(result, { a: { cache_bytes: 1 } })
+})
+
+test('collectNodeMetrics marks a failed fetch without stale fields', async () => {
+  const result = await collectNodeMetrics(
+    [
+      { id: 'a', enabled: true },
+      { id: 'b', enabled: true },
+    ],
+    async (node) => {
+      if (node.id === 'b') throw new Error('timeout')
+      return { cache_bytes: 1 }
+    },
+  )
+
+  assert.deepEqual(result, { a: { cache_bytes: 1 }, b: { fetchFailed: true } })
+})
+
+test('collectNodeMetrics throws with the first failure as cause', async () => {
+  await assert.rejects(
+    collectNodeMetrics([{ id: 'a', enabled: true }], async () => {
+      throw new Error('auth expired')
+    }),
+    (error) =>
+      error.message === 'Metrics unavailable for every node' &&
+      error.cause.message === 'auth expired',
+  )
+})
+
+test('collectNodeMetrics returns empty when no nodes are enabled', async () => {
+  assert.deepEqual(await collectNodeMetrics([], async () => ({})), {})
+  assert.deepEqual(
+    await collectNodeMetrics([{ id: 'a', enabled: false }], async () => ({})),
+    {},
   )
 })
 
