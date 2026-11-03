@@ -272,6 +272,21 @@ def _error_text(exc: BaseException) -> str:
     return str(exc) or type(exc).__name__
 
 
+def _summarize_errors(
+    errors: Sequence[BaseException | str], *, limit: int = 5
+) -> str:
+    messages = [
+        _error_text(error) if isinstance(error, BaseException) else error
+        for error in errors
+    ]
+    if len(messages) <= limit:
+        return "; ".join(messages)
+    return (
+        "; ".join(messages[:limit])
+        + f"; ... and {len(messages) - limit} more"
+    )
+
+
 def cache_disk_usage(roots: Sequence[Path]) -> tuple[int, str | None]:
     """Sum inode-deduplicated cache bytes and report unreadable subtrees."""
 
@@ -297,7 +312,7 @@ def cache_disk_usage(roots: Sequence[Path]) -> tuple[int, str | None]:
                 seen.add(inode)
                 total += info.st_size
     if errors:
-        return total, "; ".join(_error_text(error) for error in errors)
+        return total, _summarize_errors(errors)
     return total, None
 
 
@@ -344,9 +359,9 @@ def cache_filesystem_usage(
             "no usable cache root: " + ", ".join(str(root) for root in roots)
         )
     if resolved == 0:
-        return None, None, "; ".join(errors)
+        return None, None, _summarize_errors(errors)
     if errors:
-        return total, free, "; ".join(errors)
+        return total, free, _summarize_errors(errors)
     return total, free, None
 
 

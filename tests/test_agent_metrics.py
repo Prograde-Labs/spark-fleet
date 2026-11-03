@@ -607,6 +607,52 @@ def test_cache_disk_usage_uses_exception_type_for_empty_error_text(tmp_path, mon
     assert error == "OSError"
 
 
+def test_cache_disk_usage_skips_symlinks(tmp_path):
+    root = tmp_path / "hub"
+    root.mkdir()
+    (root / "real").write_bytes(b"1234")
+    outside = tmp_path / "outside"
+    outside.write_bytes(b"x" * 100)
+    (root / "link").symlink_to(outside)
+    (root / "dangling").symlink_to(tmp_path / "missing")
+
+    total, error = cache_disk_usage([root])
+
+    assert total == 4
+    assert error is None
+
+
+def test_cache_disk_usage_dedupes_overlapping_roots(tmp_path):
+    root = tmp_path / "hub"
+    root.mkdir()
+    (root / "file").write_bytes(b"1234")
+
+    total, error = cache_disk_usage([root, root])
+
+    assert total == 4
+    assert error is None
+
+
+def test_cache_disk_usage_summarizes_many_errors(tmp_path, monkeypatch):
+    root = tmp_path / "hub"
+    root.mkdir()
+
+    def fake_walk(path, onerror=None):
+        for index in range(7):
+            onerror(OSError(f"error {index}"))
+        yield str(path), [], []
+
+    monkeypatch.setattr(metrics.os, "walk", fake_walk)
+
+    total, error = cache_disk_usage([root])
+
+    assert total == 0
+    assert "error 0" in error
+    assert "error 4" in error
+    assert "error 5" not in error
+    assert "... and 2 more" in error
+
+
 def test_cache_disk_usage_records_empty_stat_error(tmp_path, monkeypatch):
     root = tmp_path / "hub"
     root.mkdir()
