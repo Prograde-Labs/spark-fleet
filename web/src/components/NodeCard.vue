@@ -14,9 +14,9 @@ import {
 import { formatBytes, formatPercent, formatRelative } from '../format'
 import {
   cacheBarKnown,
-  cacheCapacityKnown,
   cacheKnown as metricsCacheKnown,
   cachePercent,
+  cacheStatus,
   gpuMemoryKnown,
   gpuResident,
   groupGpus,
@@ -47,7 +47,7 @@ const ringOffset = computed(
 const cacheTotal = computed(() => props.metrics.cache_total_bytes)
 const cacheFree = computed(() => props.metrics.cache_free_bytes)
 const cacheKnown = computed(() => metricsCacheKnown(props.metrics))
-const cacheCapacity = computed(() => cacheCapacityKnown(props.metrics))
+const cacheState = computed(() => cacheStatus(props.metrics))
 const cacheBar = computed(() => cacheBarKnown(props.metrics))
 const telemetry = computed(() => telemetryState(props.metrics, props.node.enabled))
 const cacheBarPercent = computed(() => cachePercent(props.metrics))
@@ -180,7 +180,7 @@ const gpuPercent = (gpu, key) => {
             <template v-if="cacheKnown">
               Filesystem {{ formatBytes(cacheFree) }} free of {{ formatBytes(cacheTotal) }}
             </template>
-            <template v-else-if="cacheCapacity">Free space unavailable</template>
+            <template v-else-if="cacheState === 'free-missing'">Free space unavailable</template>
             <template v-else>Capacity unavailable</template>
           </p>
           <p class="mt-0.5 font-mono text-[9px] text-faint">
@@ -269,7 +269,7 @@ const gpuPercent = (gpu, key) => {
         </p>
       </div>
     </div>
-    <div v-else class="mt-4 rounded-md border border-dashed border-edge px-3 py-2">
+    <div v-else-if="telemetry === 'ok'" class="mt-4 rounded-md border border-dashed border-edge px-3 py-2">
       <p class="hud-label flex items-center gap-1.5">
         <Activity class="h-3 w-3" /> No GPU telemetry
       </p>

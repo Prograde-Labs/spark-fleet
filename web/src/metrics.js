@@ -50,6 +50,22 @@ export function cacheCaption(aggregate) {
   return aggregate.complete ? 'complete' : 'partial'
 }
 
+export function cacheDetail(aggregate) {
+  const caption = cacheCaption(aggregate)
+  return {
+    caption,
+    showCapacity:
+      caption === 'complete' ||
+      (caption === 'partial' && aggregate.capacityReported > 0),
+  }
+}
+
+export function cacheStatus(metrics) {
+  if (cacheKnown(metrics)) return 'filesystem'
+  if (cacheCapacityKnown(metrics)) return 'free-missing'
+  return 'capacity-missing'
+}
+
 export function cacheBarKnown(metrics) {
   return cacheBytesKnown(metrics) && cacheCapacityKnown(metrics)
 }
@@ -102,32 +118,28 @@ export function cacheAggregate(metricsByNode) {
     reported(metrics.cache_bytes) ||
     reported(metrics.cache_total_bytes) ||
     reported(metrics.cache_free_bytes)
+  const paired = counted.filter(
+    (metrics) =>
+      reported(metrics.cache_total_bytes) &&
+      reported(metrics.cache_free_bytes),
+  )
+  const capacityNodes = paired.filter(
+    (metrics) => Number(metrics.cache_total_bytes) > 0,
+  ).length
   const reportedNodes = counted.filter((metrics) =>
     reported(metrics.cache_bytes),
-  ).length
-  const capacityNodes = counted.filter((metrics) =>
-    reported(metrics.cache_total_bytes),
-  ).length
-  const freeNodes = counted.filter((metrics) =>
-    reported(metrics.cache_free_bytes),
   ).length
   const used = counted.reduce(
     (sum, metrics) =>
       reported(metrics.cache_bytes) ? sum + Number(metrics.cache_bytes) : sum,
     0,
   )
-  const capacity = counted.reduce(
-    (sum, metrics) =>
-      reported(metrics.cache_total_bytes)
-        ? sum + Number(metrics.cache_total_bytes)
-        : sum,
+  const capacity = paired.reduce(
+    (sum, metrics) => sum + Number(metrics.cache_total_bytes),
     0,
   )
-  const free = counted.reduce(
-    (sum, metrics) =>
-      reported(metrics.cache_free_bytes)
-        ? sum + Number(metrics.cache_free_bytes)
-        : sum,
+  const free = paired.reduce(
+    (sum, metrics) => sum + Number(metrics.cache_free_bytes),
     0,
   )
   const complete =
@@ -149,6 +161,5 @@ export function cacheAggregate(metricsByNode) {
     complete,
     reported: reportedNodes,
     capacityReported: capacityNodes,
-    freeReported: freeNodes,
   }
 }

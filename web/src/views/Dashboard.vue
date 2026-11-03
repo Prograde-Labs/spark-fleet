@@ -21,7 +21,7 @@ import {
   statusTone,
 } from '../format'
 import { eventState } from '../stores/events'
-import { cacheAggregate, cacheCaption, cacheHeadline, collectNodeMetrics } from '../metrics'
+import { cacheAggregate, cacheDetail, cacheHeadline, collectNodeMetrics } from '../metrics'
 import NodeCard from '../components/NodeCard.vue'
 import Topology from '../components/Topology.vue'
 
@@ -39,6 +39,7 @@ const now = ref(Date.now())
 let timer = null
 let ticker = null
 let inflight = null
+let loadGeneration = 0
 
 const loadedDeployments = computed(() =>
   deployments.value.filter((item) => item.deployment.status === 'loaded'),
@@ -50,6 +51,7 @@ const primaryDeployment = computed(
   () => primaryCandidates.value.find((item) => item.deployment.is_primary) || null,
 )
 const cacheTotals = computed(() => cacheAggregate(metricsByNode.value))
+const cacheView = computed(() => cacheDetail(cacheTotals.value))
 const onlineNodes = computed(
   () =>
     nodes.value.filter((node) => {
@@ -59,43 +61,55 @@ const onlineNodes = computed(
 )
 const liveEvents = computed(() => eventState.events.slice(0, 40))
 
+function errorText(exc) {
+  return exc.cause?.message
+    ? `${exc.message} (${exc.cause.message})`
+    : exc.message || String(exc)
+}
+
 async function load({ force = false } = {}) {
-  if (inflight) {
-    if (!force) return inflight
-    await inflight
-  }
-  inflight = (async () => {
-    refreshing.value = true
-    error.value = null
+  if (inflight && !force) return inflight
+  if (inflight) await inflight
+  const generation = ++loadGeneration
+  refreshing.value = true
+  const current = (async () => {
     try {
       const [nodeResponse, deploymentResponse] = await Promise.all([
         api.nodes.list(),
         api.deployments.list(),
       ])
+      if (generation !== loadGeneration) return
       nodes.value = nodeResponse.nodes || []
       deployments.value = deploymentResponse.deployments || []
-      await loadMetrics()
+      try {
+        const metrics = await collectNodeMetrics(nodes.value, async (node) => {
+          const response = await api.metrics.node(node.id, { limit: 1 })
+          return response.latest || {}
+        })
+        if (generation !== loadGeneration) return
+        metricsByNode.value = metrics
+        error.value = null
+      } catch (exc) {
+        if (generation !== loadGeneration) return
+        metricsByNode.value = {}
+        error.value = errorText(exc)
+      }
     } catch (exc) {
+      if (generation !== loadGeneration) return
       nodes.value = []
       deployments.value = []
       metricsByNode.value = {}
-      error.value = exc.cause?.message
-        ? `${exc.message} (${exc.cause.message})`
-        : exc.message || String(exc)
+      error.value = errorText(exc)
     } finally {
-      loading.value = false
-      refreshing.value = false
-      inflight = null
+      if (generation === loadGeneration) {
+        loading.value = false
+        refreshing.value = false
+        inflight = null
+      }
     }
   })()
-  return inflight
-}
-
-async function loadMetrics() {
-  metricsByNode.value = await collectNodeMetrics(nodes.value, async (node) => {
-    const response = await api.metrics.node(node.id, { limit: 1 })
-    return response.latest || {}
-  })
+  inflight = current
+  return current
 }
 
 async function checkNode(node) {
@@ -112,6 +126,7 @@ async function checkNode(node) {
 async function makePrimary(item) {
   if (item.deployment.is_primary) return
   busyPrimary.value = item.deployment.id
+  error.value = null
   notice.value = null
   try {
     await api.deployments.setPrimary(item.deployment.id)
@@ -223,13 +238,11 @@ onBeforeUnmount(() => {
         </div>
         <p class="stat-value mt-2">{{ formatBytes(cacheHeadline(cacheTotals)) }}</p>
         <p class="mt-1 font-mono text-[10px] text-faint">
-          <template v-if="cacheCaption(cacheTotals) === 'complete'">
+          <template v-if="cacheView.caption === 'complete'">
             of {{ formatBytes(cacheTotals.capacity) }} · {{ formatBytes(cacheTotals.free) }} free
           </template>
-          <template v-else-if="cacheCaption(cacheTotals) === 'partial'">
-            <template
-              v-if="cacheTotals.capacityReported > 0 && cacheTotals.freeReported > 0"
-            >
+          <template v-else-if="cacheView.caption === 'partial'">
+            <template v-if="cacheView.showCapacity">
               of {{ formatBytes(cacheTotals.capacity) }} · {{ formatBytes(cacheTotals.free) }} free · partial
             </template>
             <template v-else>Across reporting cache roots</template>
