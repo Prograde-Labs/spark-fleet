@@ -277,7 +277,7 @@ def cache_disk_usage(roots: Sequence[Path]) -> tuple[int, str | None]:
 
     seen: set[tuple[int, int]] = set()
     total = 0
-    errors: list[str] = []
+    errors: list[BaseException] = []
     for root in roots:
         if not root.is_dir():
             continue
@@ -402,6 +402,11 @@ def collect_metrics(
         )
     if usage_error:
         cache_errors.append(usage_error)
+    if cache_bytes is None and not cache_errors:
+        cache_errors.append("cache bytes unavailable")
+    if cache_total_bytes is None or cache_free_bytes is None:
+        if not usage_error:
+            cache_errors.append("cache capacity unknown")
     if cache_errors:
         errors["cache"] = "; ".join(cache_errors)
 

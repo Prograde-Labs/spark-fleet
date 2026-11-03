@@ -591,7 +591,23 @@ def test_cache_disk_usage_sums_and_reports_walk_errors(tmp_path, monkeypatch):
     assert "permission denied" in error
 
 
-def test_cache_filesystem_usage_dedupes_roots_on_one_device(tmp_path):
+def test_cache_disk_usage_uses_exception_type_for_empty_error_text(tmp_path, monkeypatch):
+    root = tmp_path / "hub"
+    root.mkdir()
+
+    def fake_walk(path, onerror=None):
+        onerror(OSError())
+        yield str(path), [], []
+
+    monkeypatch.setattr(metrics.os, "walk", fake_walk)
+
+    total, error = cache_disk_usage([root])
+
+    assert total == 0
+    assert error == "OSError"
+
+
+def test_cache_filesystem_usage_skips_duplicate_device_without_probing(tmp_path):
     first = tmp_path / "hub"
     second = tmp_path / "hub" / "models"
     first.mkdir()
@@ -603,6 +619,8 @@ def test_cache_filesystem_usage_dedupes_roots_on_one_device(tmp_path):
 
     def fake_usage(path):
         calls.append(path)
+        if path == second:
+            raise OSError("duplicate device should not be probed")
         return SimpleNamespace(total=1000, free=250)
 
     total, free, error = cache_filesystem_usage(
@@ -847,6 +865,71 @@ def test_collect_metrics_ignores_empty_capacity_error_text(tmp_path):
     assert snapshot.cache_total_bytes == 1000
     assert snapshot.cache_free_bytes == 250
     assert "cache" not in snapshot.errors
+
+
+def test_collect_metrics_reports_no_cache_roots(tmp_path):
+    snapshot = collect_metrics(
+        [],
+        meminfo_path=write_meminfo(tmp_path),
+        container_sampler=lambda: [],
+        cache_sampler=lambda: 0,
+        gpu_sampler=lambda: ((), None),
+    )
+
+    assert snapshot.cache_total_bytes is None
+    assert snapshot.cache_free_bytes is None
+    assert "no cache roots configured" in snapshot.errors["cache"]
+
+
+def test_collect_metrics_reports_unknown_capacity_without_error_text(tmp_path):
+    snapshot = collect_metrics(
+        [tmp_path / "hub"],
+        meminfo_path=write_meminfo(tmp_path),
+        container_sampler=lambda: [],
+        cache_sampler=lambda: 500,
+        cache_usage_sampler=lambda: (None, None, ""),
+        gpu_sampler=lambda: ((), None),
+    )
+
+    assert snapshot.cache_total_bytes is None
+    assert snapshot.cache_free_bytes is None
+    assert "cache capacity unknown" in snapshot.errors["cache"]
+
+
+def test_collect_metrics_reports_unknown_cache_bytes_without_error_text(tmp_path):
+    snapshot = collect_metrics(
+        [tmp_path / "hub"],
+        meminfo_path=write_meminfo(tmp_path),
+        container_sampler=lambda: [],
+        cache_sampler=lambda: None,
+        cache_usage_sampler=lambda: (1000, 250, None),
+        gpu_sampler=lambda: ((), None),
+    )
+
+    assert snapshot.cache_bytes is None
+    assert "cache bytes unavailable" in snapshot.errors["cache"]
+
+
+def test_collect_metrics_records_empty_walk_error(tmp_path, monkeypatch):
+    root = tmp_path / "hub"
+    root.mkdir()
+
+    def fake_walk(path, onerror=None):
+        onerror(OSError())
+        yield str(path), [], []
+
+    monkeypatch.setattr(metrics.os, "walk", fake_walk)
+
+    snapshot = collect_metrics(
+        [root],
+        meminfo_path=write_meminfo(tmp_path),
+        container_sampler=lambda: [],
+        cache_usage_sampler=lambda: (1000, 250, None),
+        gpu_sampler=lambda: ((), None),
+    )
+
+    assert snapshot.cache_bytes == 0
+    assert "OSError" in snapshot.errors["cache"]
 
 
 def test_collect_metrics_records_default_cache_error(tmp_path, monkeypatch):
