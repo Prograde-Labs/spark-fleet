@@ -69,6 +69,7 @@ class ModelSpec(StrictModel):
     served_name: str = Field(alias="servedName", pattern=ALIAS_PATTERN)
     revision: str | None = None
     extra_repos: list[str] = Field(default_factory=list, alias="extraRepos")
+    context_length: int | None = Field(default=None, alias="contextLength", ge=1)
 
     @field_validator("extra_repos")
     @classmethod

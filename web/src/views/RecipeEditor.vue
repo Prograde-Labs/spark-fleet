@@ -167,6 +167,13 @@ function normalizeNumbers() {
     }
     if (role.readiness.port === '') delete role.readiness.port
   }
+  if (spec.model) {
+    if (spec.model.contextLength === '' || spec.model.contextLength === null) {
+      delete spec.model.contextLength
+    } else {
+      spec.model.contextLength = Number(spec.model.contextLength)
+    }
+  }
 }
 
 function applyYaml() {
