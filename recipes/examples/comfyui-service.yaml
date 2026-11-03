@@ -1,0 +1,24 @@
+apiVersion: spark-fleet/v1
+kind: Recipe
+metadata:
+  name: comfyui-service
+  displayName: ComfyUI
+  description: Image-generation service managed separately from heavy deployments.
+spec:
+  mode: service
+  runtime: comfyui
+  roles:
+    - name: comfyui
+      node: spark-02
+      class: light
+      startOrder: 0
+      service:
+        image: ghcr.io/your-org/comfyui:latest
+        network_mode: host
+        gpus: all
+        ipc: host
+        volumes:
+          - /srv/spark-fleet/hub/comfyui:/workspace
+        environment:
+          CLI_ARGS: --listen 0.0.0.0 --port 8188
+        restart: unless-stopped

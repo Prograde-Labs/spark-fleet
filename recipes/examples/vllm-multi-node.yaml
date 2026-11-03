@@ -1,0 +1,77 @@
+apiVersion: spark-fleet/v1
+kind: Recipe
+metadata:
+  name: vllm-multi-node
+  displayName: vLLM Multi-Node
+  description: Two Spark nodes serving one model over the fabric link.
+spec:
+  mode: deployment
+  runtime: vllm
+  model:
+    repo: org/your-model
+    servedName: FLEET-MODEL
+    revision: null
+    extraRepos: []
+  gateway:
+    aliases: [fleet-model]
+  topology:
+    preset: custom
+    masterPort: 25000
+    tensorParallelSize: 2
+  roles:
+    - name: worker
+      node: spark-02
+      class: heavy
+      startOrder: 10
+      readiness:
+        type: running
+        timeoutSeconds: 3600
+      service:
+        image: vllm/vllm-openai:latest
+        network_mode: host
+        gpus: all
+        ipc: host
+        shm_size: 32gb
+        environment:
+          MASTER_ADDR: "{{ node.spark-01.fabricIp }}"
+          MASTER_PORT: "{{ topology.masterPort }}"
+          NODE_RANK: "1"
+        command:
+          - vllm
+          - serve
+          - "{{ model.repo }}"
+          - --served-model-name
+          - "{{ model.servedName }}"
+          - --tensor-parallel-size
+          - "2"
+          - --port
+          - "8888"
+    - name: head
+      node: spark-01
+      class: heavy
+      startOrder: 20
+      inferencePort: 8888
+      readiness:
+        type: http
+        path: /v1/models
+        timeoutSeconds: 3600
+      service:
+        image: vllm/vllm-openai:latest
+        network_mode: host
+        gpus: all
+        ipc: host
+        shm_size: 32gb
+        environment:
+          MASTER_ADDR: "{{ node.spark-01.fabricIp }}"
+          MASTER_PORT: "{{ topology.masterPort }}"
+          NODE_RANK: "0"
+        command:
+          - vllm
+          - serve
+          - "{{ model.repo }}"
+          - --served-model-name
+          - "{{ model.servedName }}"
+          - --tensor-parallel-size
+          - "2"
+          - --port
+          - "8888"

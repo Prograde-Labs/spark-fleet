@@ -1,0 +1,46 @@
+apiVersion: spark-fleet/v1
+kind: Recipe
+metadata:
+  name: tensorfold-single
+  displayName: TensorFold Single Node
+  description: TensorFold EXL3 serving on one Spark.
+spec:
+  mode: deployment
+  runtime: tensorfold
+  model:
+    repo: org/your-exl3-model
+    servedName: TF-MODEL
+  gateway:
+    aliases: [tensorfold]
+  topology:
+    preset: single
+    masterPort: 25000
+  roles:
+    - name: head
+      node: spark-01
+      class: heavy
+      startOrder: 10
+      inferencePort: 8000
+      readiness:
+        type: http
+        path: /v1/models
+        timeoutSeconds: 1800
+      service:
+        image: ghcr.io/your-org/tensorfold:latest
+        network_mode: host
+        gpus: all
+        ipc: host
+        shm_size: 32gb
+        environment:
+          MODEL_REPO: "{{ model.repo }}"
+          SERVED_NAME: "{{ model.servedName }}"
+        command:
+          - python
+          - -m
+          - tensorfold.server
+          - --model
+          - "{{ model.repo }}"
+          - --served-model-name
+          - "{{ model.servedName }}"
+          - --port
+          - "8000"

@@ -1,0 +1,45 @@
+apiVersion: spark-fleet/v1
+kind: Recipe
+metadata:
+  name: sglang-single
+  displayName: SGLang Single Node
+  description: SGLang OpenAI-compatible server on one Spark.
+spec:
+  mode: deployment
+  runtime: sglang
+  model:
+    repo: org/your-model
+    servedName: SGL-MODEL
+  gateway:
+    aliases: [sglang]
+  topology:
+    preset: single
+    masterPort: 25000
+  roles:
+    - name: head
+      node: spark-01
+      class: heavy
+      startOrder: 10
+      inferencePort: 30000
+      readiness:
+        type: http
+        path: /health
+        timeoutSeconds: 1800
+      service:
+        image: lmsysorg/sglang:latest
+        network_mode: host
+        gpus: all
+        ipc: host
+        shm_size: 32gb
+        command:
+          - python
+          - -m
+          - sglang.launch_server
+          - --model-path
+          - "{{ model.repo }}"
+          - --served-model-name
+          - "{{ model.servedName }}"
+          - --host
+          - 0.0.0.0
+          - --port
+          - "30000"

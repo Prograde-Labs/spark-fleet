@@ -1,0 +1,42 @@
+apiVersion: spark-fleet/v1
+kind: Recipe
+metadata:
+  name: llamacpp-single
+  displayName: llama.cpp Single Node
+  description: GGUF model served by llama.cpp with a mounted cache.
+spec:
+  mode: deployment
+  runtime: llamacpp
+  model:
+    repo: org/your-gguf-model
+    servedName: GGUF-MODEL
+  gateway:
+    aliases: [llamacpp]
+  topology:
+    preset: single
+    masterPort: 25000
+  roles:
+    - name: head
+      node: spark-02
+      class: heavy
+      startOrder: 10
+      inferencePort: 8080
+      readiness:
+        type: http
+        path: /health
+        timeoutSeconds: 900
+      service:
+        image: ghcr.io/ggerganov/llama.cpp:server
+        network_mode: host
+        gpus: all
+        volumes:
+          - /srv/spark-fleet/hub:/models
+        command:
+          - --model
+          - /models/org/your-gguf-model/model.gguf
+          - --host
+          - 0.0.0.0
+          - --port
+          - "8080"
+          - --n-gpu-layers
+          - "99"

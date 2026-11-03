@@ -1,0 +1,24 @@
+apiVersion: spark-fleet/v1
+kind: Recipe
+metadata:
+  name: openwebui-service
+  displayName: OpenWebUI
+  description: Operator chat UI served independently of inference deployments.
+spec:
+  mode: service
+  runtime: custom
+  roles:
+    - name: openwebui
+      node: spark-01
+      class: light
+      startOrder: 0
+      service:
+        image: ghcr.io/open-webui/open-webui:main
+        ports:
+          - "3000:8080"
+        volumes:
+          - /var/lib/spark-fleet/openwebui:/app/backend/data
+        environment:
+          OPENAI_API_BASE_URL: http://127.0.0.1:8091/v1
+          OPENAI_API_KEY: spark-active
+        restart: unless-stopped
