@@ -240,7 +240,7 @@ test('cacheAggregate is incomplete with zero capacity', () => {
   assert.equal(aggregate.capacity, 1000)
   assert.equal(aggregate.free, 250)
   assert.equal(aggregate.capacityReported, 1)
-  assert.equal(aggregate.usedWithCapacity, 2)
+  assert.equal(aggregate.usedWithCapacity, 1)
 })
 
 test('cacheAggregate with no nodes is empty and incomplete', () => {
@@ -365,6 +365,15 @@ test('cacheDetail shows capacity only when every used reporter has capacity', ()
       cacheAggregate({
         a: { cache_bytes: 10, cache_total_bytes: 1000, cache_free_bytes: 250 },
         b: { cache_bytes: 5 },
+      }),
+    ),
+    { caption: 'partial', showCapacity: false },
+  )
+  assert.deepEqual(
+    cacheDetail(
+      cacheAggregate({
+        a: { cache_bytes: 10, cache_total_bytes: 1000, cache_free_bytes: 250 },
+        b: { cache_bytes: 0, cache_total_bytes: 0, cache_free_bytes: 0 },
       }),
     ),
     { caption: 'partial', showCapacity: false },

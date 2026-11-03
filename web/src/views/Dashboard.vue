@@ -119,7 +119,7 @@ async function checkNode(node) {
       [node.id]: await api.nodes.check(node.id),
     }
   } catch (exc) {
-    notice.value = `${node.display_name}: ${exc.message}`
+    error.value = exc.message || String(exc)
   }
 }
 

@@ -124,7 +124,7 @@ export function cacheAggregate(metricsByNode) {
   const usedWithCapacity = counted.filter(
     (metrics) =>
       reported(metrics.cache_bytes) &&
-      reported(metrics.cache_total_bytes) &&
+      Number(metrics.cache_total_bytes) > 0 &&
       reported(metrics.cache_free_bytes),
   ).length
   const used = counted.reduce(
