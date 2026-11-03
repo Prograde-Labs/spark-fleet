@@ -18,7 +18,6 @@ const props = defineProps({
   metrics: { type: Object, default: () => ({}) },
   health: { type: Object, default: null },
   deployments: { type: Array, default: () => [] },
-  cacheMax: { type: Number, default: 0 },
 })
 
 const emit = defineEmits(['check'])
@@ -35,9 +34,12 @@ const memoryPercent = computed(() =>
 const ringOffset = computed(
   () => CIRCUMFERENCE * (1 - memoryPercent.value / 100),
 )
+const cacheTotal = computed(() => Number(props.metrics.cache_total_bytes || 0))
+const cacheFree = computed(() => Number(props.metrics.cache_free_bytes || 0))
+const cacheCapacityKnown = computed(() => cacheTotal.value > 0)
 const cachePercent = computed(() =>
-  props.cacheMax > 0
-    ? Math.min(100, (Number(props.metrics.cache_bytes || 0) / props.cacheMax) * 100)
+  cacheCapacityKnown.value
+    ? Math.min(100, (Number(props.metrics.cache_bytes || 0) / cacheTotal.value) * 100)
     : 0,
 )
 const containerPercent = computed(() =>
@@ -80,6 +82,17 @@ const gpuPercent = (gpu, key) => {
     return Math.min(100, ((gpu[usedKey] || 0) / gpu[totalKey]) * 100)
   }
   return Math.min(100, Number(gpu[key] || 0))
+}
+
+const gpuMemoryKnown = (gpu) =>
+  gpu.memory_total_bytes !== null &&
+  gpu.memory_total_bytes !== undefined &&
+  gpu.memory_used_bytes !== null &&
+  gpu.memory_used_bytes !== undefined
+
+const gpuResident = (gpu) => {
+  if (gpu.resident === null || gpu.resident === undefined) return null
+  return Number(gpu.resident) >= 1
 }
 </script>
 
@@ -176,6 +189,12 @@ const gpuPercent = (gpu, key) => {
             />
           </div>
           <p class="mt-1 font-mono text-[9px] text-faint">
+            <template v-if="cacheCapacityKnown">
+              {{ formatBytes(cacheFree) }} free of {{ formatBytes(cacheTotal) }}
+            </template>
+            <template v-else>Capacity unavailable</template>
+          </p>
+          <p class="mt-0.5 font-mono text-[9px] text-faint">
             Container {{ formatBytes(metrics.container_memory_bytes) }} ·
             {{ formatPercent(containerPercent, 1) }} of host
           </p>
@@ -202,19 +221,42 @@ const gpuPercent = (gpu, key) => {
               <Thermometer class="h-3 w-3 text-warning" />
               {{ gpu.temperature_celsius ?? '—' }}°C
             </span>
+            <span
+              v-if="gpuResident(gpu) !== null"
+              class="chip"
+              :class="gpuResident(gpu) ? 'chip-live' : ''"
+            >
+              <span class="h-1.5 w-1.5 rounded-full bg-current" />
+              {{ gpuResident(gpu) ? 'resident' : 'idle' }}
+            </span>
           </span>
         </div>
         <div class="mt-1.5 flex items-center gap-2">
-          <div class="h-1 flex-1 overflow-hidden rounded-full bg-edge">
-            <div
-              class="h-full rounded-full bg-cyan/70"
-              :style="{ width: `${gpuPercent(gpu, 'memory')}%` }"
-            />
-          </div>
-          <span class="w-24 text-right font-mono text-[9px] text-faint">
-            {{ formatBytes(gpu.memory_used_bytes) }} / {{ formatBytes(gpu.memory_total_bytes) }}
+          <template v-if="gpuMemoryKnown(gpu)">
+            <div class="h-1 flex-1 overflow-hidden rounded-full bg-edge">
+              <div
+                class="h-full rounded-full bg-cyan/70"
+                :style="{ width: `${gpuPercent(gpu, 'memory')}%` }"
+              />
+            </div>
+            <span class="w-24 text-right font-mono text-[9px] text-faint">
+              {{ formatBytes(gpu.memory_used_bytes) }} / {{ formatBytes(gpu.memory_total_bytes) }}
+            </span>
+          </template>
+          <span v-else class="flex-1 font-mono text-[9px] text-faint">
+            GPU memory N/A · unified host memory
           </span>
         </div>
+        <p
+          v-if="gpu.compute_memory_bytes !== null && gpu.compute_memory_bytes !== undefined"
+          class="mt-1 font-mono text-[9px] text-faint"
+        >
+          {{ formatBytes(gpu.compute_memory_bytes) }} in compute apps
+          <span v-if="gpu.compute_processes !== null && gpu.compute_processes !== undefined">
+            · {{ gpu.compute_processes }}
+            process{{ Number(gpu.compute_processes) === 1 ? '' : 'es' }}
+          </span>
+        </p>
       </div>
     </div>
     <div v-else class="mt-4 rounded-md border border-dashed border-edge px-3 py-2">

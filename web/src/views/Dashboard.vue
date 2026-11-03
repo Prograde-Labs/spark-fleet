@@ -47,15 +47,21 @@ const primaryCandidates = computed(() =>
 const primaryDeployment = computed(
   () => primaryCandidates.value.find((item) => item.deployment.is_primary) || null,
 )
-const cacheMax = computed(() =>
-  Math.max(
-    0,
-    ...Object.values(metricsByNode.value).map((m) => Number(m.cache_bytes || 0)),
-  ),
-)
 const totalCache = computed(() =>
   Object.values(metricsByNode.value).reduce(
     (sum, m) => sum + Number(m.cache_bytes || 0),
+    0,
+  ),
+)
+const totalCacheCapacity = computed(() =>
+  Object.values(metricsByNode.value).reduce(
+    (sum, m) => sum + Number(m.cache_total_bytes || 0),
+    0,
+  ),
+)
+const totalCacheFree = computed(() =>
+  Object.values(metricsByNode.value).reduce(
+    (sum, m) => sum + Number(m.cache_free_bytes || 0),
     0,
   ),
 )
@@ -225,7 +231,12 @@ onBeforeUnmount(() => {
           <Database class="h-4 w-4 text-warning" />
         </div>
         <p class="stat-value mt-2">{{ formatBytes(totalCache) }}</p>
-        <p class="mt-1 font-mono text-[10px] text-faint">Across all cache roots</p>
+        <p class="mt-1 font-mono text-[10px] text-faint">
+          <template v-if="totalCacheCapacity > 0">
+            of {{ formatBytes(totalCacheCapacity) }} · {{ formatBytes(totalCacheFree) }} free
+          </template>
+          <template v-else>Across all cache roots</template>
+        </p>
       </div>
     </section>
 
@@ -274,7 +285,6 @@ onBeforeUnmount(() => {
               :metrics="metricsByNode[node.id] || {}"
               :health="healthFor(node)"
               :deployments="deployments"
-              :cache-max="cacheMax"
               @check="checkNode"
             />
             <div
