@@ -105,11 +105,32 @@ files.
 
 Cutover is manual. The old head controller and the agent already occupy
 `8091`/`8092`, so run the new controller on a free temporary port such as
-`8099`, register nodes, import from the old controllers, review diffs, apply,
-and load one deployment. Verify `/v1/models` and role logs on the temporary
-port, then stop the old head controller, recreate the new controller on `8091`,
-and keep the old worker controller as the rollback path. See the README for the
-exact commands.
+`8099`, register nodes, and import recipes from the old controllers. Import
+fidelity is imperfect: served names come from `--served-model-name` only when
+the flag is a separate command token, so shell-embedded flags and
+`x-served-model` fall back to the workload name; grouping by master address/port
+can conflate alternative configs that share one rendezvous port; and
+`light`-classed worker ranks are treated as services. Review the plan and
+correct recipe roles and served names before loading.
+
+### Adopted deployments (zero-downtime controller switch)
+
+A running legacy-controller heavy can stay live while the controller is replaced by
+recording it as a loaded deployment whose recipe points at the existing
+inference port, without running Compose. The gateway routes by node LAN IP and
+the role's inference port, so the adopted deployment proxies the old container
+directly.
+
+Startup reconciliation compares loaded deployments with agent container state.
+Old containers carry `legacy.*` labels rather than `spark.fleet.*`, so an
+adopted deployment is marked failed on the next controller restart. Adopt only
+after the final controller startup, and re-adopt after any restart. Never load
+or redeploy an adopted deployment: its fleet project does not own the running
+containers, so a load would create duplicates that collide on GPU memory and
+ports. To migrate the workload for real, unload it through the old controller
+first, then load the fleet deployment.
+
+See the README for the exact cutover and rollback commands.
 
 ## Known v1 limits
 

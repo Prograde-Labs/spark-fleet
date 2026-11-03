@@ -94,22 +94,36 @@ docker compose --env-file .env.example -f compose.agent.yaml config --quiet
 
 ## Cutover from a legacy controller
 
-1. Register the fleet nodes in the new controller (Nodes → Register node) with
-   the agent URLs on port `8092`.
-2. Start the new controller on a free temporary port (the old head controller
-   and the agent already use `8091`/`8092`; use e.g. `8099`):
-   `SPARK_FLEET_CONTROLLER_PORT=8099 docker compose --env-file .env -f compose.controller.yaml up -d --build`.
-3. Open `http://<head-lan-ip>:8099`, run Import against the old controller URLs
-   (`http://<head>:8091` and `http://<worker>:8091`), review the proposed diffs,
-   and apply. Import is read-only against the old controllers.
-4. Load one imported deployment and verify the gateway (`/v1/models`) and role
-   logs on the temporary port.
-5. Stop the old head controller. Recreate the new controller with
-   `SPARK_FLEET_CONTROLLER_PORT=8091` (or edit `.env`) and start it on the
-   production port.
-6. Leave the old worker controller running until the new fleet is stable; it is
-   the rollback path. To roll back, stop the new controller and restart the old
-   head controller on `8091`.
+The live cutover keeps the running heavy up while the controller changes. Old
+containers carry `legacy.*` labels and are invisible to the fleet, so the
+new controller is given a loaded **adopted** deployment that points at the
+existing inference port; no Compose load runs against the old containers.
+
+1. Register the fleet nodes (agent URLs on `8092`) in the new controller.
+2. Build and start the agents on every node.
+3. Start the new controller on a free temporary port such as `8099` and verify
+   `/health`, node checks, and the UI.
+4. Import recipes from the old controllers (read-only) and review the diffs.
+   The importer is conservative: it may skip workloads, conflate alternative
+   configs that share a rendezvous port, or fall back to the workload name for
+   served names. Correct the recipe files before use.
+5. Create the deployment record for the running heavy and verify the gateway on
+   the temporary port. Do not load it while the old containers are running.
+6. Stop the old head controller, switch the new controller to `8091`, and wait
+   for startup reconciliation to finish.
+7. Mark the running heavy's deployment loaded (roles running) and set it
+   primary. Verify `/v1/models`, a non-streaming chat, and a streaming chat on
+   `8091`.
+8. Leave the old worker controller running as the rollback path. To roll back,
+   stop the new controller and restart the old head controller on `8091`.
+
+An adopted deployment is not backed by fleet-labeled containers, so startup
+reconciliation marks it failed on the next controller restart. Re-adopt it after
+a restart, or migrate the workload for real by unloading it through the old
+controller first and then loading the fleet deployment. Do not load or redeploy
+an adopted deployment: its fleet project does not own the running containers, so
+a load would create duplicates that collide on GPU memory and ports. See
+[docs/architecture.md](docs/architecture.md) for details.
 
 ## Recipes
 
