@@ -173,10 +173,8 @@ function normalizeNumbers() {
       delete spec.model.contextLength
     } else if (raw !== undefined && raw !== null) {
       const value = Number(raw)
-      if (Number.isFinite(value)) {
+      if (Number.isInteger(value) && value >= 1) {
         spec.model.contextLength = value
-      } else {
-        delete spec.model.contextLength
       }
     }
   }
