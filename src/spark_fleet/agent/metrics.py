@@ -104,7 +104,10 @@ def read_host_memory(path: Path = MEMINFO_PATH) -> HostMemory:
 
 
 def collect_gpus(
-    *, timeout: float = GPU_TIMEOUT_SECONDS, runner: Callable[..., Any] = subprocess.run
+    *,
+    timeout: float = GPU_TIMEOUT_SECONDS,
+    runner: Callable[..., Any] = subprocess.run,
+    clock: Callable[[], float] = time.monotonic,
 ) -> tuple[tuple[GpuInfo, ...], str | None]:
     """Query ``nvidia-smi`` and return GPU data plus an error when unavailable.
 
@@ -114,7 +117,7 @@ def collect_gpus(
     idle GPU from an unknown one.
     """
 
-    started = time.monotonic()
+    started = clock()
     try:
         result = runner(
             ["nvidia-smi", GPU_QUERY, _GPU_FORMAT],
@@ -146,24 +149,33 @@ def collect_gpus(
     if errors:
         errors = [f"could not parse nvidia-smi output: {'; '.join(errors)}"]
 
-    remaining = max(0.1, timeout - (time.monotonic() - started))
+    if not gpus:
+        return (), "; ".join(errors) or None
+
+    remaining = max(0.0, timeout - (clock() - started))
+    if remaining <= 0:
+        errors.append("could not query compute processes: no time budget remaining")
+        return tuple(gpus), "; ".join(errors)
     compute_counts, compute_error = _collect_compute_apps(
         timeout=remaining, runner=runner
     )
     if compute_error is not None:
         errors.append(compute_error)
     else:
-        if compute_counts and any(gpu.uuid is None for gpu in gpus):
+        known = {gpu.uuid for gpu in gpus if gpu.uuid is not None}
+        unmatched = sorted(set(compute_counts) - known)
+        if unmatched:
             errors.append(
-                "could not attribute compute processes: missing GPU UUID"
+                "could not attribute compute processes: " + ", ".join(unmatched)
             )
-        gpus = list(_apply_compute_apps(gpus, compute_counts))
+        else:
+            gpus = list(_apply_compute_apps(gpus, compute_counts))
     return tuple(gpus), "; ".join(errors) or None
 
 
 def _collect_compute_apps(
     *, timeout: float, runner: Callable[..., Any]
-) -> tuple[dict[str, tuple[int, int]], str | None]:
+) -> tuple[dict[str, tuple[int, int | None]], str | None]:
     """Return per-GPU compute process counts and summed memory, best effort."""
 
     try:
@@ -177,7 +189,10 @@ def _collect_compute_apps(
     except FileNotFoundError:
         return {}, "could not query compute processes: nvidia-smi not available"
     except subprocess.TimeoutExpired:
-        return {}, f"could not query compute processes: timed out after {timeout} seconds"
+        return {}, (
+            "could not query compute processes: timed out after "
+            f"{timeout:.1f}s of remaining budget"
+        )
     except OSError as exc:
         return {}, f"could not query compute processes: {exc}"
 
@@ -189,7 +204,7 @@ def _collect_compute_apps(
             else f"could not query compute processes: exited {result.returncode}"
         )
 
-    counts: dict[str, tuple[int, int]] = {}
+    counts: dict[str, tuple[int, int | None]] = {}
     parse_errors: list[str] = []
     for line in result.stdout.splitlines():
         if not line.strip():
@@ -199,8 +214,14 @@ def _collect_compute_apps(
         except ValueError as exc:
             parse_errors.append(str(exc))
             continue
-        count, total = counts.get(uuid, (0, 0))
-        counts[uuid] = (count + 1, total + memory_bytes)
+        if uuid in counts:
+            count, total = counts[uuid]
+            counts[uuid] = (
+                count + 1,
+                None if total is None or memory_bytes is None else total + memory_bytes,
+            )
+        else:
+            counts[uuid] = (1, memory_bytes)
     if parse_errors:
         return counts, (
             "could not parse nvidia-smi compute-apps output: "
@@ -210,17 +231,16 @@ def _collect_compute_apps(
 
 
 def _apply_compute_apps(
-    gpus: Sequence[GpuInfo], counts: Mapping[str, tuple[int, int]]
+    gpus: Sequence[GpuInfo], counts: Mapping[str, tuple[int, int | None]]
 ) -> tuple[GpuInfo, ...]:
     updated: list[GpuInfo] = []
     for gpu in gpus:
         if gpu.uuid is None:
-            if not counts:
-                updated.append(
-                    replace(gpu, compute_processes=0, compute_memory_bytes=0)
-                )
-            else:
-                updated.append(gpu)
+            # Every compute row matched a known GPU (or none exist), so this
+            # device cannot be running a compute process.
+            updated.append(
+                replace(gpu, compute_processes=0, compute_memory_bytes=0)
+            )
             continue
         processes, memory_bytes = counts.get(gpu.uuid, (0, 0))
         updated.append(
@@ -387,7 +407,7 @@ def _parse_gpu_line(line: str) -> GpuInfo:
     )
 
 
-def _parse_compute_line(line: str) -> tuple[str, int]:
+def _parse_compute_line(line: str) -> tuple[str, int | None]:
     try:
         rows = list(csv.reader([line], skipinitialspace=True))
     except csv.Error as exc:
@@ -399,7 +419,7 @@ def _parse_compute_line(line: str) -> tuple[str, int]:
     uuid = _optional_text(fields[0])
     if uuid is None:
         raise ValueError(f"missing GPU UUID: {line!r}")
-    return uuid, _mib(fields[3]) or 0
+    return uuid, _mib(fields[3])
 
 
 def _required_int(value: str, field: str) -> int:
