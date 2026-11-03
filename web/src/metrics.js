@@ -29,25 +29,31 @@ export function cachePercent(metrics) {
 const reported = (value) => value !== null && value !== undefined
 
 export function cacheAggregate(metricsByNode) {
-  const contributors = Object.values(metricsByNode || {}).filter((metrics) =>
-    reported(metrics.cache_bytes),
-  )
-  const used = contributors.reduce(
-    (sum, metrics) => sum + Number(metrics.cache_bytes || 0),
+  const entries = Object.values(metricsByNode || {})
+  const used = entries.reduce(
+    (sum, metrics) =>
+      reported(metrics.cache_bytes) ? sum + Number(metrics.cache_bytes) : sum,
     0,
   )
-  const capacity = contributors.reduce(
-    (sum, metrics) => sum + Number(metrics.cache_total_bytes || 0),
+  const capacity = entries.reduce(
+    (sum, metrics) =>
+      reported(metrics.cache_total_bytes)
+        ? sum + Number(metrics.cache_total_bytes)
+        : sum,
     0,
   )
-  const free = contributors.reduce(
-    (sum, metrics) => sum + Number(metrics.cache_free_bytes || 0),
+  const free = entries.reduce(
+    (sum, metrics) =>
+      reported(metrics.cache_free_bytes)
+        ? sum + Number(metrics.cache_free_bytes)
+        : sum,
     0,
   )
   const complete =
-    contributors.length > 0 &&
-    contributors.every(
+    entries.length > 0 &&
+    entries.every(
       (metrics) =>
+        reported(metrics.cache_bytes) &&
         reported(metrics.cache_total_bytes) &&
         Number(metrics.cache_total_bytes) > 0 &&
         reported(metrics.cache_free_bytes),

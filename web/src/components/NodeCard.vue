@@ -181,7 +181,7 @@ const gpuPercent = (gpu, key) => {
           </div>
           <p class="mt-1 font-mono text-[9px] text-faint">
             <template v-if="cacheKnown">
-              {{ formatBytes(cacheFree) }} free of {{ formatBytes(cacheTotal) }}
+              Filesystem {{ formatBytes(cacheFree) }} free of {{ formatBytes(cacheTotal) }}
             </template>
             <template v-else>Capacity unavailable</template>
           </p>

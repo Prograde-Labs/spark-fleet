@@ -37,7 +37,7 @@ test('cachePercent scales cache bytes to filesystem capacity', () => {
   assert.equal(cachePercent({ cache_bytes: 250 }), 0)
 })
 
-test('cacheAggregate excludes nodes without cache bytes', () => {
+test('cacheAggregate includes capacity from a node without cache bytes', () => {
   const aggregate = cacheAggregate({
     a: { cache_bytes: 10, cache_total_bytes: 1000, cache_free_bytes: 250 },
     b: { cache_total_bytes: 4000, cache_free_bytes: 1000 },
@@ -45,9 +45,23 @@ test('cacheAggregate excludes nodes without cache bytes', () => {
 
   assert.deepEqual(aggregate, {
     used: 10,
+    capacity: 5000,
+    free: 1250,
+    complete: false,
+  })
+})
+
+test('cacheAggregate is incomplete for an empty node entry', () => {
+  const aggregate = cacheAggregate({
+    a: { cache_bytes: 10, cache_total_bytes: 1000, cache_free_bytes: 250 },
+    b: {},
+  })
+
+  assert.deepEqual(aggregate, {
+    used: 10,
     capacity: 1000,
     free: 250,
-    complete: true,
+    complete: false,
   })
 })
 
@@ -116,7 +130,7 @@ test('cacheAggregate is incomplete with zero capacity', () => {
   assert.equal(aggregate.complete, false)
 })
 
-test('cacheAggregate with no contributors is empty and incomplete', () => {
+test('cacheAggregate with no nodes is empty and incomplete', () => {
   assert.deepEqual(cacheAggregate({}), {
     used: 0,
     capacity: 0,
