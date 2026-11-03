@@ -304,7 +304,11 @@ def _root_list(roots: Sequence[Path], *, limit: int = 5) -> str:
     return ", ".join(names[:limit]) + f", ... and {len(names) - limit} more"
 
 
-def cache_disk_usage(roots: Sequence[Path]) -> tuple[int, str | None]:
+def cache_disk_usage(
+    roots: Sequence[Path],
+    *,
+    stat: Callable[[Path], os.stat_result] = os.stat,
+) -> tuple[int, str | None]:
     """Sum inode-deduplicated cache bytes and report unreadable subtrees."""
 
     seen: set[tuple[int, int]] = set()
@@ -313,7 +317,7 @@ def cache_disk_usage(roots: Sequence[Path]) -> tuple[int, str | None]:
     errors = _ErrorLog()
     for root in sorted(roots, key=lambda path: len(path.parts)):
         try:
-            info = root.stat()
+            info = stat(root)
         except FileNotFoundError:
             errors.add(f"{root}: not found")
             continue
@@ -327,7 +331,7 @@ def cache_disk_usage(roots: Sequence[Path]) -> tuple[int, str | None]:
             continue
         for dirpath, _dirnames, filenames in os.walk(root, onerror=errors.add):
             try:
-                dir_info = os.stat(dirpath)
+                dir_info = stat(dirpath)
             except OSError as exc:
                 errors.add(exc)
                 continue

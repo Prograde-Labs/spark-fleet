@@ -672,7 +672,7 @@ def test_cache_disk_usage_reports_missing_and_non_directory_roots(tmp_path):
     assert f"{file_root}: not a directory" in error
 
 
-def test_cache_disk_usage_records_directory_stat_error(tmp_path, monkeypatch):
+def test_cache_disk_usage_records_directory_stat_error(tmp_path):
     root = tmp_path / "hub"
     nested = root / "nested"
     nested.mkdir(parents=True)
@@ -684,12 +684,29 @@ def test_cache_disk_usage_records_directory_stat_error(tmp_path, monkeypatch):
             raise OSError("dir stat failed")
         return real_stat(path, *args, **kwargs)
 
-    monkeypatch.setattr(metrics.os, "stat", fake_stat)
-
-    total, error = cache_disk_usage([root])
+    total, error = cache_disk_usage([root], stat=fake_stat)
 
     assert total == 0
     assert "dir stat failed" in error
+
+
+def test_cache_disk_usage_reports_unreadable_root_beside_valid_root(tmp_path):
+    blocked = tmp_path / "blocked"
+    root = tmp_path / "hub"
+    blocked.mkdir()
+    root.mkdir()
+    (root / "file").write_bytes(b"1234")
+    real_stat = os.stat
+
+    def fake_stat(path, *args, **kwargs):
+        if Path(path) == blocked:
+            raise PermissionError("permission denied")
+        return real_stat(path, *args, **kwargs)
+
+    total, error = cache_disk_usage([blocked, root], stat=fake_stat)
+
+    assert total == 4
+    assert f"{blocked}: permission denied" in error
 
 
 def test_cache_disk_usage_dedupes_hardlinked_files(tmp_path):
@@ -897,7 +914,8 @@ def test_cache_filesystem_usage_caps_root_prefix(tmp_path):
     assert "no usable cache root" in error
     assert "root-4" in error
     assert "root-5" not in error
-    assert "... and 2 more" in error
+    assert error.count("... and 2 more") == 2
+    assert error.count("... and 2 more") == 2
 
 
 def test_cache_filesystem_usage_keeps_five_errors_without_suffix(tmp_path):
