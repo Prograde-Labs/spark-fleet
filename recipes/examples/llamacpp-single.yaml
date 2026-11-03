@@ -30,10 +30,10 @@ spec:
         network_mode: host
         gpus: all
         volumes:
-          - /srv/spark-fleet/hub:/models
+          - /srv/spark-fleet/hub/gguf:/models
         command:
           - --model
-          - /models/org/your-gguf-model/model.gguf
+          - /models/model.gguf
           - --host
           - 0.0.0.0
           - --port

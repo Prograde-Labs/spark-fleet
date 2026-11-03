@@ -46,9 +46,17 @@ enable it. Setting only one is a configuration error.
 - Agents mount the Docker socket because they execute Compose on their node.
 - Agent containers use host networking so recipe-declared inference ports and
   host-network workloads work directly. They are not privileged and do not add
-  devices, capabilities, host PID/IPC namespaces, or broad host-home mounts.
+  host PID/IPC namespaces, devices, or broad host-home mounts.
+- Both stacks drop all capabilities. The controller re-adds only `CHOWN`,
+  `SETUID`, `SETGID`, and `DAC_OVERRIDE` so its entrypoint can prepare mounted
+  data directories and drop to uid 10001. The agent re-adds only
+  `DAC_OVERRIDE` so root can write user-owned host cache directories. The agent
+  requests `gpus: all` for `nvidia-smi` telemetry, which exposes GPU devices to
+  the agent but not to the controller.
 - Agent mounts are narrow: `/var/run/docker.sock`, a dedicated agent data
-  directory, and the configured model cache root.
+  directory, and one model cache root mounted at `/srv/spark-fleet/hub`. Multi-root
+  cache configuration is supported by the agent config but not by the packaged
+  single-mount Compose stack.
 - Controller mounts are a data directory and a recipes directory only.
 
 ## Recipes and workloads

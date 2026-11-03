@@ -104,9 +104,14 @@ All types accept `timeoutSeconds` (default 3600) and `intervalSeconds` (default 
 
 The renderer resolves:
 
-- `{{ node.<id>.lanIp }}` and `{{ node.<id>.fabricIp }}`
-- `{{ topology.masterPort }}`
-- `{{ model.repo }}` and `{{ model.servedName }}`
+- `{{ deployment.name }}` and `{{ deployment.id }}`
+- `{{ node.<id>.lanIp }}` and `{{ node.<id>.fabricIp }}` for every registered node
+- `{{ role.<name>.node.lanIp }}` and `{{ role.<name>.node.fabricIp }}`
+- `{{ topology.masterPort }}`, `{{ topology.worldSize }}`, and
+  `{{ topology.tensorParallelSize }}` when set
+- `{{ topology.masterAddr }}` (the fabric IP of the first heavy role) and
+  `{{ topology.nodeRank }}` on heavy roles
+- `{{ model.repo }}`, `{{ model.servedName }}`, and `{{ model.revision }}` when set
 
 Use quoted placeholders so YAML parses them as strings.
 
@@ -175,3 +180,9 @@ All examples parse against the schema and target `spark-01`/`spark-02`.
 - Service recipes cannot be primary and cannot declare gateway aliases.
 - Model repos are cached per node; a deployment fails validation if any role's
   node lacks the model. Download it first from the Model Vault.
+- Mount the host cache into heavy containers and set `HF_HOME` (the examples do
+  this) or the workload will re-download into its writable layer.
+- Published-port collisions are checked per node across roles, not just within
+  one service.
+- Use absolute host paths for volumes; relative paths resolve inside the agent's
+  Compose project directory, not the host working directory.

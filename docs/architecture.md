@@ -81,7 +81,9 @@ flag, and apply the rollback policy: `restore` reloads displaced deployments,
 ## Telemetry and state
 
 - Agents expose `/metrics` with host memory, managed-container memory, cache
-  bytes, and per-GPU values.
+  bytes, and per-GPU values when `nvidia-smi` is available. The packaged agent
+  requests `gpus: all`, which requires the NVIDIA container toolkit on the node;
+  without it, GPU collection degrades to an error entry.
 - The controller polls nodes and metrics on configured intervals, writes series
   to SQLite, prunes by retention (24h default at 10s), and incrementally vacuums.
 - Gateway counters flush into inference samples: request/error counts, latency,
@@ -101,9 +103,13 @@ lights into prepare jobs, skips obsolete log helpers, and shows old-vs-new diffs
 Apply requires explicit confirmation and writes pending deployments plus recipe
 files.
 
-Cutover is manual: bring the new controller up on a temporary port, verify the
-import, stop the old head controller, and move the new controller to `8091`.
-The worker's old controller can stay for rollback.
+Cutover is manual. The old head controller and the agent already occupy
+`8091`/`8092`, so run the new controller on a free temporary port such as
+`8099`, register nodes, import from the old controllers, review diffs, apply,
+and load one deployment. Verify `/v1/models` and role logs on the temporary
+port, then stop the old head controller, recreate the new controller on `8091`,
+and keep the old worker controller as the rollback path. See the README for the
+exact commands.
 
 ## Known v1 limits
 

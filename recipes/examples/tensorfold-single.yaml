@@ -29,9 +29,12 @@ spec:
         image: ghcr.io/your-org/tensorfold:latest
         network_mode: host
         gpus: all
+        volumes:
+          - /srv/spark-fleet/hub:/srv/spark-fleet/hub
         ipc: host
         shm_size: 32gb
         environment:
+          HF_HOME: /srv/spark-fleet/hub
           MODEL_REPO: "{{ model.repo }}"
           SERVED_NAME: "{{ model.servedName }}"
         command:

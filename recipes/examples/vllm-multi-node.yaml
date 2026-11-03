@@ -30,9 +30,12 @@ spec:
         image: vllm/vllm-openai:latest
         network_mode: host
         gpus: all
+        volumes:
+          - /srv/spark-fleet/hub:/srv/spark-fleet/hub
         ipc: host
         shm_size: 32gb
         environment:
+          HF_HOME: /srv/spark-fleet/hub
           MASTER_ADDR: "{{ node.spark-01.fabricIp }}"
           MASTER_PORT: "{{ topology.masterPort }}"
           NODE_RANK: "1"
@@ -59,9 +62,12 @@ spec:
         image: vllm/vllm-openai:latest
         network_mode: host
         gpus: all
+        volumes:
+          - /srv/spark-fleet/hub:/srv/spark-fleet/hub
         ipc: host
         shm_size: 32gb
         environment:
+          HF_HOME: /srv/spark-fleet/hub
           MASTER_ADDR: "{{ node.spark-01.fabricIp }}"
           MASTER_PORT: "{{ topology.masterPort }}"
           NODE_RANK: "0"

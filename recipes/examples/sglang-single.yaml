@@ -29,6 +29,8 @@ spec:
         image: lmsysorg/sglang:latest
         network_mode: host
         gpus: all
+        volumes:
+          - /srv/spark-fleet/hub:/srv/spark-fleet/hub
         ipc: host
         shm_size: 32gb
         command:

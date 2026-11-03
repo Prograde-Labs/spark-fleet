@@ -39,7 +39,7 @@ COPY docker/controller-entrypoint.sh /usr/local/bin/controller-entrypoint.sh
 RUN chmod +x /usr/local/bin/controller-entrypoint.sh
 EXPOSE 8091
 HEALTHCHECK --interval=20s --timeout=5s --start-period=20s --retries=3 \
-    CMD python -c "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8091/health', timeout=3)"
+    CMD python -c "import os, urllib.request; host=os.environ.get('SPARK_FLEET_CONTROLLER_HOST','0.0.0.0'); host='127.0.0.1' if host in ('0.0.0.0','::') else host; port=os.environ.get('SPARK_FLEET_CONTROLLER_PORT','8091'); urllib.request.urlopen(f'http://{host}:{port}/health', timeout=3)"
 ENTRYPOINT ["/usr/local/bin/controller-entrypoint.sh"]
 CMD ["spark-fleet-controller"]
 
@@ -57,7 +57,7 @@ RUN apt-get update \
     && apt-get install -y --no-install-recommends ca-certificates curl \
     && rm -rf /var/lib/apt/lists/*
 RUN set -eux; \
-    case "${TARGETARCH:-amd64}" in \
+    case "${TARGETARCH:?TARGETARCH is required}" in \
         amd64) ARCH=x86_64 ;; \
         arm64) ARCH=aarch64 ;; \
         *) echo "unsupported TARGETARCH=${TARGETARCH}" >&2; exit 1 ;; \
@@ -73,5 +73,5 @@ RUN pip install --no-cache-dir /tmp/*.whl && rm -rf /tmp/*.whl
 RUN mkdir -p /var/lib/spark-fleet-agent
 EXPOSE 8092
 HEALTHCHECK --interval=20s --timeout=5s --start-period=15s --retries=3 \
-    CMD python -c "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8092/health', timeout=3)"
+    CMD python -c "import os, urllib.request; host=os.environ.get('SPARK_FLEET_AGENT_HOST','0.0.0.0'); host='127.0.0.1' if host in ('0.0.0.0','::') else host; port=os.environ.get('SPARK_FLEET_AGENT_PORT','8092'); urllib.request.urlopen(f'http://{host}:{port}/health', timeout=3)"
 ENTRYPOINT ["spark-fleet-agent"]

@@ -12,6 +12,11 @@ services:
       - no-new-privileges:true
     cap_drop:
       - ALL
+    cap_add:
+      - CHOWN
+      - SETUID
+      - SETGID
+      - DAC_OVERRIDE
     env_file:
       - path: .env
         required: false
@@ -29,15 +34,15 @@ services:
       SPARK_FLEET_NODE_POLL_INTERVAL_SECONDS: ${SPARK_FLEET_NODE_POLL_INTERVAL_SECONDS:-15}
       SPARK_FLEET_LOG_LEVEL: ${SPARK_FLEET_LOG_LEVEL:-INFO}
     volumes:
-      - ${SPARK_FLEET_DATA_DIR:-./data}:/var/lib/spark-fleet
-      - ${SPARK_FLEET_RECIPES_DIR:-./recipes}:/var/lib/spark-fleet/recipes
+      - ${SPARK_FLEET_DATA_HOST_DIR:-./data}:/var/lib/spark-fleet
+      - ${SPARK_FLEET_RECIPES_HOST_DIR:-./recipes}:/var/lib/spark-fleet/recipes
     healthcheck:
       test:
         [
           "CMD",
           "python",
           "-c",
-          "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8091/health', timeout=3)",
+          "import os, urllib.request; host=os.environ.get('SPARK_FLEET_CONTROLLER_HOST','0.0.0.0'); host='127.0.0.1' if host in ('0.0.0.0','::') else host; port=os.environ.get('SPARK_FLEET_CONTROLLER_PORT','8091'); urllib.request.urlopen(f'http://{host}:{port}/health', timeout=3)",
         ]
       interval: 20s
       timeout: 5s

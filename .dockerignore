@@ -14,3 +14,4 @@ data
 *.sqlite-shm
 .env
 .env.local
+agent-data

@@ -35,6 +35,7 @@ def test_controller_compose_is_host_network_without_docker_socket():
     assert service["build"]["target"] == "controller"
     assert "healthcheck" in service
     assert service["cap_drop"] == ["ALL"]
+    assert set(service["cap_add"]) == {"CHOWN", "SETUID", "SETGID", "DAC_OVERRIDE"}
     assert "no-new-privileges:true" in service["security_opt"]
     volumes = service.get("volumes", [])
     assert not any("docker.sock" in volume for volume in volumes)
@@ -55,6 +56,8 @@ def test_agent_compose_has_narrow_mounts_and_no_extra_privileges():
     assert service["build"]["target"] == "agent"
     assert "healthcheck" in service
     assert service["cap_drop"] == ["ALL"]
+    assert service["cap_add"] == ["DAC_OVERRIDE"]
+    assert service["gpus"] == "all"
     assert "no-new-privileges:true" in service["security_opt"]
     volumes = service.get("volumes", [])
     assert "/var/run/docker.sock:/var/run/docker.sock" in volumes
@@ -66,7 +69,6 @@ def test_agent_compose_has_narrow_mounts_and_no_extra_privileges():
         "pid",
         "ipc",
         "devices",
-        "cap_add",
         "userns_mode",
     }
     assert forbidden.isdisjoint(service)
@@ -80,6 +82,7 @@ def test_env_example_documents_required_and_optional_secrets():
     assert "SPARK_FLEET_UI_PASSWORD=" in text
     assert "SPARK_FLEET_SESSION_SECRET=" in text
     assert "SPARK_FLEET_WEB_DIST" not in text or "replace-with" in text
-    assert "replace-with-at-least-16" in text
-    assert "replace-with-a-strong-password" in text
-    assert "replace-with-at-least-32" in text
+    assert "CHANGE_ME" in text
+    assert "SPARK_FLEET_DATA_HOST_DIR=./data" in text
+    assert "SPARK_FLEET_RECIPES_HOST_DIR=./recipes" in text
+    assert "SPARK_FLEET_MODEL_CACHE_HOST_DIR=/srv/spark-fleet/hub" in text

@@ -36,9 +36,10 @@ The controller exposes:
 
 ## Quick start
 
-1. Copy `.env.example` to `.env` and set `SPARK_FLEET_AGENT_TOKEN` (at least 16
-   URL-safe characters). The same token must be used by the controller and every
-   agent. To require UI login, also set both `SPARK_FLEET_UI_PASSWORD` and
+1. Copy `.env.example` to `.env` and replace `SPARK_FLEET_AGENT_TOKEN=CHANGE_ME`
+   with at least 16 URL-safe characters. The same token must be used by the
+   controller and every agent; config validation rejects the placeholder. To
+   require UI login, also set both `SPARK_FLEET_UI_PASSWORD` and
    `SPARK_FLEET_SESSION_SECRET` (32+ characters).
 2. Build and start the controller on the head node:
 
@@ -46,11 +47,13 @@ The controller exposes:
    docker compose --env-file .env -f compose.controller.yaml up -d --build
    ```
 
-3. Build and start an agent on each node:
+3. Build and start an agent on each node. `SPARK_FLEET_AGENT_NODE_ID` must
+   match the id you register in the controller; override it per node (for
+   example `spark-02`). `SPARK_FLEET_MODEL_CACHE_HOST_DIR` is the single host
+   cache root mounted at `/srv/spark-fleet/hub` inside the agent.
 
    ```sh
    SPARK_FLEET_AGENT_NODE_ID=spark-01 \
-   SPARK_FLEET_MODEL_CACHE_ROOT=/srv/spark-fleet/hub \
    docker compose --env-file .env -f compose.agent.yaml up -d --build
    ```
 
@@ -59,9 +62,16 @@ The controller exposes:
    recipe or import the old controllers.
 
 The controller image serves the SPA from `/app/web`; the `SPARK_FLEET_WEB_DIST`
-environment variable is already set in `compose.controller.yaml`. For local
-development run the API with `uvicorn` and the SPA with `npm run dev` (Vite
-proxies `/api`, `/v1`, and `/events` to `127.0.0.1:8091`).
+environment variable is already set in `compose.controller.yaml`. Host bind
+paths are `SPARK_FLEET_DATA_HOST_DIR` (default `./data`) and
+`SPARK_FLEET_RECIPES_HOST_DIR` (default `./recipes`, which includes the example
+recipes). The controller entrypoint chowns only those top-level directories and
+drops to uid 10001. For local development run the API with `uvicorn` and the SPA
+with `npm run dev` (Vite proxies `/api`, `/v1`, and `/events` to
+`127.0.0.1:8091`).
+
+GPU telemetry requires the NVIDIA container toolkit on the node; the agent
+Compose stack requests `gpus: all` so `nvidia-smi` is available for metrics.
 
 ## Development
 
@@ -81,6 +91,25 @@ Static Compose validation:
 docker compose --env-file .env.example -f compose.controller.yaml config --quiet
 docker compose --env-file .env.example -f compose.agent.yaml config --quiet
 ```
+
+## Cutover from a legacy controller
+
+1. Register the fleet nodes in the new controller (Nodes → Register node) with
+   the agent URLs on port `8092`.
+2. Start the new controller on a free temporary port (the old head controller
+   and the agent already use `8091`/`8092`; use e.g. `8099`):
+   `SPARK_FLEET_CONTROLLER_PORT=8099 docker compose --env-file .env -f compose.controller.yaml up -d --build`.
+3. Open `http://<head-lan-ip>:8099`, run Import against the old controller URLs
+   (`http://<head>:8091` and `http://<worker>:8091`), review the proposed diffs,
+   and apply. Import is read-only against the old controllers.
+4. Load one imported deployment and verify the gateway (`/v1/models`) and role
+   logs on the temporary port.
+5. Stop the old head controller. Recreate the new controller with
+   `SPARK_FLEET_CONTROLLER_PORT=8091` (or edit `.env`) and start it on the
+   production port.
+6. Leave the old worker controller running until the new fleet is stable; it is
+   the rollback path. To roll back, stop the new controller and restart the old
+   head controller on `8091`.
 
 ## Recipes
 

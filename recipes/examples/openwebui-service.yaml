@@ -14,11 +14,11 @@ spec:
       startOrder: 0
       service:
         image: ghcr.io/open-webui/open-webui:main
-        ports:
-          - "3000:8080"
+        network_mode: host
         volumes:
-          - /var/lib/spark-fleet/openwebui:/app/backend/data
+          - /srv/spark-fleet/hub/openwebui:/app/backend/data
         environment:
+          PORT: "3000"
           OPENAI_API_BASE_URL: http://127.0.0.1:8091/v1
           OPENAI_API_KEY: spark-active
         restart: unless-stopped
