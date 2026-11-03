@@ -30,6 +30,10 @@ SHIPPED_CONTEXT_LENGTHS = {
     "demo-qwen-sglang-plain-radixark": 262144,
 }
 
+# The llama.cpp recipe leaves contextLength unset so the gateway reads the
+# serving limit from the upstream model card.
+UPSTREAM_CONTEXT_RECIPES = {"demo-llamacpp"}
+
 DEPLOYMENT = {
     "apiVersion": "spark-fleet/v1",
     "kind": "Recipe",
@@ -213,19 +217,21 @@ def test_model_context_length_rejects_invalid_values(value):
         parse_recipe(data)
 
 
-@pytest.mark.parametrize("name,expected", sorted(SHIPPED_CONTEXT_LENGTHS.items()))
-def test_shipped_recipes_declare_expected_context_length(name, expected):
-    recipe = load_recipe_file(ROOT / "recipes" / f"{name}.yaml")
-
-    assert recipe.spec.model is not None
-    assert recipe.spec.model.context_length == expected
-
-
-def test_shipped_llamacpp_recipe_relies_on_upstream_context():
-    recipe = load_recipe_file(ROOT / "recipes" / "demo-llamacpp.yaml")
-
-    assert recipe.spec.model is not None
-    assert recipe.spec.model.context_length is None
+@pytest.mark.parametrize(
+    "path",
+    sorted((ROOT / "recipes").glob("*.yaml")),
+    ids=lambda path: path.stem,
+)
+def test_shipped_recipes_parse_and_declare_context(path):
+    recipe = load_recipe_file(path)
+    if recipe.spec.model is None:
+        return
+    if path.stem in UPSTREAM_CONTEXT_RECIPES:
+        return
+    assert path.stem in SHIPPED_CONTEXT_LENGTHS, (
+        f"{path.name} declares a model but is not in SHIPPED_CONTEXT_LENGTHS"
+    )
+    assert recipe.spec.model.context_length == SHIPPED_CONTEXT_LENGTHS[path.stem]
 
 
 def test_load_recipe_file(tmp_path):

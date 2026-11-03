@@ -327,6 +327,24 @@ async def test_models_falls_back_to_llamacpp_meta_n_ctx_train(db):
     assert {item["max_model_len"] for item in body["data"]} == {131072}
 
 
+async def test_models_reads_llamacpp_meta_from_single_upstream_entry(db):
+    add_deployment(db, served_name="Demo-Model-B")
+
+    def handler(request):
+        return httpx.Response(
+            200,
+            json={
+                "object": "list",
+                "data": [{"id": "/models/qwen.gguf", "meta": {"n_ctx": 65536}}],
+            },
+        )
+
+    async with FleetGateway(db, transport=httpx.MockTransport(handler)) as gateway:
+        body = await gateway.models()
+
+    assert {item["max_model_len"] for item in body["data"]} == {65536}
+
+
 async def test_models_falls_back_to_single_upstream_entry(db):
     add_deployment(db, served_name="Demo-Model-B")
 
@@ -439,6 +457,22 @@ async def test_models_omits_context_when_upstream_fails(db):
         ),
         httpx.Response(
             200, json={"object": "list", "data": [{"id": "Demo-Model-B", "context_length": -1}]}
+        ),
+        httpx.Response(
+            200, json={"object": "list", "data": [{"id": "Demo-Model-B", "meta": "not-a-mapping"}]}
+        ),
+        httpx.Response(
+            200, json={"object": "list", "data": [{"id": "Demo-Model-B", "meta": {"n_ctx": True}}]}
+        ),
+        httpx.Response(
+            200, json={"object": "list", "data": [{"id": "Demo-Model-B", "meta": {"n_ctx": 0}}]}
+        ),
+        httpx.Response(
+            200,
+            json={
+                "object": "list",
+                "data": [{"id": "Demo-Model-B", "meta": {"n_ctx_train": "131072"}}],
+            },
         ),
     ],
 )
