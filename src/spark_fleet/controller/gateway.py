@@ -330,14 +330,16 @@ class FleetGateway:
         )
         if not keys:
             return {}
+        for key in list(self._context_cache):
+            if key not in keys:
+                del self._context_cache[key]
         now = time.monotonic()
         results: dict[tuple[str, str], int] = {}
         pending: list[tuple[str, str]] = []
         for key in keys:
             cached = self._context_cache.get(key)
             if cached is not None and now - cached[0] < UPSTREAM_CONTEXT_CACHE_TTL_SECONDS:
-                if cached[1] is not None:
-                    results[key] = cached[1]
+                results[key] = cached[1]
             else:
                 pending.append(key)
         if not pending:
@@ -349,8 +351,8 @@ class FleetGateway:
             )
         )
         for key, value in zip(pending, fetched):
-            self._context_cache[key] = (now, value)
             if value is not None:
+                self._context_cache[key] = (now, value)
                 results[key] = value
         return results
 
@@ -362,7 +364,7 @@ class FleetGateway:
                 f"{upstream_url}/v1/models",
                 timeout=UPSTREAM_CONTEXT_TIMEOUT_SECONDS,
             )
-        except httpx.HTTPError:
+        except (httpx.HTTPError, httpx.InvalidURL):
             return None
         if response.status_code != 200:
             return None
