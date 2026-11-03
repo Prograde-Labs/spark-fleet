@@ -406,3 +406,13 @@ def test_agent_accepts_node_id_with_dots_and_underscores():
     )
 
     assert config.node_id == "spark.02_1"
+
+
+def test_controller_requires_ui_password_with_session_secret():
+    with pytest.raises(ConfigError, match="SPARK_FLEET_UI_PASSWORD"):
+        load_controller_config(
+            {
+                "SPARK_FLEET_AGENT_TOKEN": TOKEN,
+                "SPARK_FLEET_SESSION_SECRET": SECRET,
+            }
+        )

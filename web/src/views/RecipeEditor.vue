@@ -1,5 +1,5 @@
 <script setup>
-import { computed, onMounted, ref } from 'vue'
+import { computed, onMounted, ref, watch } from 'vue'
 import yaml from 'js-yaml'
 import {
   ArrowRightLeft,
@@ -28,7 +28,7 @@ const notice = ref(null)
 const validation = ref(null)
 const savedYaml = ref('')
 const saving = ref(false)
-const deleting = ref(false)
+const deleteArmed = ref(null)
 const swapOpen = ref(false)
 const swapBusy = ref(false)
 const swapPreview = ref(null)
@@ -43,7 +43,9 @@ const hasModel = computed(() => Boolean(draft.value?.spec?.model))
 const dirty = computed(() => {
   if (!draft.value) return false
   const current =
-    tab.value === 'yaml' ? yamlText.value : yaml.dump(draft.value, { noRefs: true })
+    tab.value === 'yaml'
+      ? yamlText.value
+      : yaml.dump(draft.value, { noRefs: true, lineWidth: 100 })
   return current !== savedYaml.value
 })
 
@@ -59,7 +61,7 @@ function blankRecipe() {
     spec: {
       mode: 'deployment',
       runtime: 'custom',
-      topology: { preset: 'single', masterPort: null },
+      topology: { preset: 'single', masterPort: 25000 },
       model: null,
       gateway: null,
       roles: [],
@@ -72,13 +74,20 @@ function normalize(recipe) {
   const copy = structuredClone(recipe)
   copy.metadata = copy.metadata || {}
   copy.spec = copy.spec || {}
-  copy.spec.topology = copy.spec.topology || { preset: 'single', masterPort: null }
+  copy.spec.topology = copy.spec.topology || { preset: 'single', masterPort: 25000 }
+  if (!Number.isInteger(copy.spec.topology.masterPort) || copy.spec.topology.masterPort <= 0) {
+    copy.spec.topology.masterPort = 25000
+  }
   copy.spec.roles = copy.spec.roles || []
   copy.spec.prepare = copy.spec.prepare || []
   for (const role of copy.spec.roles) {
     role.service = role.service || {}
     role.readiness = role.readiness || { type: 'running', timeoutSeconds: 3600 }
-    if (role.readiness.timeoutSeconds === undefined) role.readiness.timeoutSeconds = 3600
+    if (!role.readiness.type) role.readiness.type = 'running'
+    if (!role.readiness.timeoutSeconds) role.readiness.timeoutSeconds = 3600
+    if (role.readiness.type === 'http' && !role.readiness.path) {
+      role.readiness.path = '/v1/models'
+    }
     if (role.startOrder === undefined) role.startOrder = 0
     if (role.inferencePort === undefined) role.inferencePort = null
   }
@@ -92,7 +101,7 @@ async function loadList() {
       api.recipes.list(),
       api.nodes.list(),
     ])
-    recipes.value = (recipeResponse.recipes || []).filter((item) => !item.error)
+    recipes.value = recipeResponse.recipes || []
     nodes.value = nodeResponse.nodes || []
   } catch (exc) {
     error.value = exc.message || String(exc)
@@ -109,7 +118,7 @@ async function selectRecipe(name) {
     const response = await api.recipes.get(name)
     yamlText.value = response.yaml
     draft.value = normalize(yaml.load(response.yaml))
-    savedYaml.value = yaml.dump(draft.value, { noRefs: true })
+    savedYaml.value = yaml.dump(draft.value, { noRefs: true, lineWidth: 100 })
     selected.value = name
     tab.value = 'structured'
   } catch (exc) {
@@ -119,17 +128,45 @@ async function selectRecipe(name) {
 
 function newRecipe() {
   draft.value = blankRecipe()
-  yamlText.value = yaml.dump(draft.value, { noRefs: true })
+  yamlText.value = yaml.dump(draft.value, { noRefs: true, lineWidth: 100 })
   savedYaml.value = yamlText.value
   selected.value = null
   validation.value = null
   tab.value = 'structured'
   notice.value = null
+  deleteArmed.value = null
 }
 
 function syncYaml() {
   if (!draft.value) return
+  normalizeNumbers()
   yamlText.value = yaml.dump(draft.value, { noRefs: true, lineWidth: 100 })
+}
+
+function normalizeNumbers() {
+  if (!draft.value) return
+  const spec = draft.value.spec
+  const master = Number(spec.topology?.masterPort)
+  spec.topology.masterPort =
+    Number.isInteger(master) && master > 0 ? master : 25000
+  for (const role of spec.roles || []) {
+    role.startOrder = Number.isInteger(Number(role.startOrder))
+      ? Number(role.startOrder)
+      : 0
+    role.inferencePort =
+      role.inferencePort === '' || role.inferencePort === null
+        ? null
+        : Number(role.inferencePort)
+    role.readiness = role.readiness || { type: 'running', timeoutSeconds: 3600 }
+    role.readiness.timeoutSeconds =
+      Number(role.readiness.timeoutSeconds) > 0
+        ? Number(role.readiness.timeoutSeconds)
+        : 3600
+    if (role.readiness.type === 'http' && !role.readiness.path) {
+      role.readiness.path = '/v1/models'
+    }
+    if (role.readiness.port === '') delete role.readiness.port
+  }
 }
 
 function applyYaml() {
@@ -155,6 +192,7 @@ function currentYaml() {
   if (tab.value === 'yaml') {
     if (!applyYaml()) return null
   }
+  normalizeNumbers()
   syncYaml()
   return yamlText.value
 }
@@ -187,7 +225,7 @@ async function saveRecipe() {
     const response = await api.recipes.put(name, text)
     yamlText.value = response.yaml
     draft.value = normalize(yaml.load(response.yaml))
-    savedYaml.value = yaml.dump(draft.value, { noRefs: true })
+    savedYaml.value = yaml.dump(draft.value, { noRefs: true, lineWidth: 100 })
     selected.value = name
     notice.value = `Saved ${name}`
     await loadList()
@@ -200,16 +238,18 @@ async function saveRecipe() {
 
 async function deleteRecipe() {
   if (!selected.value) return
-  if (!deleting.value) {
-    deleting.value = true
+  if (deleteArmed.value !== selected.value) {
+    deleteArmed.value = selected.value
     return
   }
-  deleting.value = false
+  deleteArmed.value = null
   try {
     await api.recipes.remove(selected.value)
     notice.value = `Deleted ${selected.value}`
     selected.value = null
     draft.value = null
+    yamlText.value = ''
+    savedYaml.value = ''
     await loadList()
   } catch (exc) {
     error.value = exc.message || String(exc)
@@ -318,12 +358,14 @@ onMounted(async () => {
         :key="recipe.name"
         class="mb-1 flex w-full items-center gap-2 rounded-md border border-transparent px-2 py-2 text-left transition hover:border-edge hover:bg-raised/60"
         :class="selected === recipe.name ? '!border-cyan/30 !bg-cyan/[0.06]' : ''"
-        @click="selectRecipe(recipe.name)"
+        @click="recipe.error ? (error = recipe.error) : selectRecipe(recipe.name)"
       >
         <div class="min-w-0 flex-1">
-          <p class="truncate font-mono text-[11px] text-ink">{{ recipe.name }}</p>
+          <p class="truncate font-mono text-[11px]" :class="recipe.error ? 'text-danger' : 'text-ink'">
+            {{ recipe.name }}
+          </p>
           <p class="font-mono text-[9px] uppercase tracking-[0.12em] text-faint">
-            {{ recipe.mode }} · {{ recipe.roles }} roles
+            {{ recipe.error ? 'invalid recipe' : `${recipe.mode} · ${recipe.roles} roles` }}
           </p>
         </div>
         <span class="chip text-[9px]">{{ recipe.runtime }}</span>
@@ -356,7 +398,13 @@ onMounted(async () => {
           <button class="btn btn-primary" :disabled="saving || !draft" @click="saveRecipe">
             <Save class="h-3.5 w-3.5" :class="{ 'animate-pulse': saving }" /> Save
           </button>
-          <button v-if="hasModel && selected" class="btn btn-violet" @click="openSwap">
+          <button
+            v-if="hasModel && selected"
+            class="btn btn-violet"
+            :disabled="dirty"
+            title="Save changes before swapping models"
+            @click="openSwap"
+          >
             <ArrowRightLeft class="h-3.5 w-3.5" /> Swap model
           </button>
         </div>
@@ -377,9 +425,14 @@ onMounted(async () => {
           {{ entry.label }}
         </button>
         <div class="ml-auto flex items-center gap-2">
-          <button v-if="selected" class="btn" :class="deleting ? 'btn-danger' : ''" @click="deleteRecipe">
+          <button
+            v-if="selected"
+            class="btn"
+            :class="deleteArmed === selected ? 'btn-danger' : ''"
+            @click="deleteRecipe"
+          >
             <Trash2 class="h-3.5 w-3.5" />
-            {{ deleting ? 'Confirm delete' : 'Delete' }}
+            {{ deleteArmed === selected ? 'Confirm delete' : 'Delete' }}
           </button>
           <button v-if="selected" class="btn" @click="openDuplicate">
             <Copy class="h-3.5 w-3.5" /> Duplicate

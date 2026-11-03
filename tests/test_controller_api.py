@@ -112,7 +112,7 @@ class FakeAgentClient:
 
     async def start_model_download(self, repo, *, root=None, revision=None, allow_patterns=None):
         self.calls.append("download")
-        if STATE.get("download_error"):
+        if STATE.get("download_error") or self.base_url == STATE.get("download_error_url"):
             raise AgentError("download rejected")
         STATE["download"] = {
             "repo": repo,
@@ -143,7 +143,10 @@ class FakeAgentClient:
         self.calls.append("container_logs")
         if STATE.get("logs_error"):
             raise AgentError("logs unavailable")
-        STATE["logs"] = {"container_id": container_id, "tail": tail}
+        if tail == 1:
+            STATE["logs_probe"] = {"container_id": container_id, "tail": tail}
+        else:
+            STATE["logs"] = {"container_id": container_id, "tail": tail}
         return "line one\nline two"
 
     async def follow_container_logs(self, container_id, *, tail=200):
@@ -369,17 +372,17 @@ def test_login_sets_cookie_and_requires_csrf(secured_env):
         "csrf": session.csrf,
     }
 
-    denied = client.put("/api/settings/theme", json={"value": "dark"})
+    denied = client.put("/api/settings/rollback_policy", json={"value": "leave-down"})
     assert denied.status_code == 403
     assert denied.json()["detail"] == "missing CSRF token"
 
     allowed = client.put(
-        "/api/settings/theme",
-        json={"value": "dark"},
+        "/api/settings/rollback_policy",
+        json={"value": "leave-down"},
         headers={"X-CSRF-Token": session.csrf},
     )
     assert allowed.status_code == 200
-    assert secured_env.db.list_settings() == {"theme": "dark"}
+    assert secured_env.db.list_settings() == {"rollback_policy": "leave-down"}
 
     assert client.post("/api/logout").status_code == 403
     client.post("/api/logout", headers={"X-CSRF-Token": session.csrf})
@@ -503,14 +506,24 @@ def test_put_recipe_rejects_invalid_yaml(env):
     assert response.status_code == 400
 
 
-def test_recipe_alias_conflict_is_409(env):
+def test_recipe_alias_conflict_with_loaded_deployment_is_409(env):
     add_node(env.client)
     add_recipe(env, "glm", RECIPE_YAML)
+    add_deployment(env.db, status="loaded")
 
     response = env.client.put("/api/recipes/other", json={"yaml": SECOND_RECIPE_YAML})
 
     assert response.status_code == 409
     assert "aliases already used by glm" in response.json()["detail"]
+
+
+def test_unloaded_recipes_may_share_aliases(env):
+    add_node(env.client)
+    add_recipe(env, "glm", RECIPE_YAML)
+
+    response = env.client.put("/api/recipes/other", json={"yaml": SECOND_RECIPE_YAML})
+
+    assert response.status_code == 200
 
 
 def test_recipe_validation_rejects_unknown_node(env):
@@ -703,6 +716,7 @@ def test_download_model_dispatches_to_nodes(env):
 
     assert response.status_code == 200
     assert response.json()["jobs"] == [{"node_id": "spark-01", "job_id": "dl-job"}]
+    assert response.json()["errors"] == []
     assert STATE["download"]["root"] == "/models"
 
 
@@ -817,12 +831,17 @@ def test_node_and_inference_metrics(env):
 def test_settings_round_trip(env):
     assert env.client.get("/api/settings").json() == {"settings": {}}
 
-    put = env.client.put("/api/settings/theme", json={"value": "dark"})
+    put = env.client.put("/api/settings/rollback_policy", json={"value": "leave-down"})
     assert put.status_code == 200
-    assert env.client.get("/api/settings").json() == {"settings": {"theme": "dark"}}
+    assert env.client.get("/api/settings").json() == {"settings": {"rollback_policy": "leave-down"}}
 
-    invalid = env.client.put("/api/settings/theme", json={"value": 1})
+    invalid = env.client.put("/api/settings/rollback_policy", json={"value": 1})
     assert invalid.status_code == 400
+    assert (
+        env.client.put("/api/settings/rollback_policy", json={"value": "explode"}).status_code
+        == 400
+    )
+    assert env.client.put("/api/settings/theme", json={"value": "dark"}).status_code == 400
 
 
 # Import -------------------------------------------------------------------
@@ -1252,6 +1271,7 @@ def test_node_container_logs_and_stream(env):
 
     assert logs.json()["logs"] == "line one\nline two"
     assert STATE["logs"] == {"container_id": "c1", "tail": 20}
+    assert STATE["logs_probe"] == {"container_id": "c1", "tail": 1}
     assert stream.text == "stream one\nstream two\n"
 
 
@@ -1264,3 +1284,40 @@ def test_config_endpoint_reports_effective_settings(env):
     assert body["nodePollIntervalSeconds"] == 15
     assert body["authEnabled"] is False
     assert body["gateway"] == {"activeAlias": "spark-active", "modelsPath": "/v1/models"}
+
+
+def test_secured_config_is_public_but_settings_are_not(secured_env):
+    config = secured_env.client.get("/api/config")
+    settings = secured_env.client.get("/api/settings")
+
+    assert config.status_code == 200
+    assert config.json()["authEnabled"] is True
+    assert settings.status_code == 401
+
+
+def test_log_stream_reports_agent_failure(env):
+    add_node(env.client)
+    add_deployment(env.db, status="loaded")
+    add_role(env.db)
+    STATE["logs_error"] = True
+
+    response = env.client.get("/api/deployments/dep-1/roles/head/logs/stream")
+
+    assert response.status_code == 502
+    assert response.json()["detail"] == "logs unavailable"
+
+
+def test_download_model_reports_partial_failure(env):
+    add_node(env.client, "spark-01")
+    add_node(env.client, "spark-02", "192.0.2.79")
+    STATE["download_error_url"] = "http://192.0.2.79:8092"
+
+    response = env.client.post(
+        "/api/models/download",
+        json={"repo": "org/model", "nodes": ["spark-01", "spark-02", "spark-01"]},
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["jobs"] == [{"node_id": "spark-01", "job_id": "dl-job"}]
+    assert body["errors"] == [{"node_id": "spark-02", "error": "download rejected"}]

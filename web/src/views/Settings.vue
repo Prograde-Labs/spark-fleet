@@ -30,14 +30,18 @@ async function load() {
   loading.value = true
   error.value = null
   try {
-    const [configResponse, settingsResponse, sessionResponse] = await Promise.all([
+    const [configResponse, sessionResponse] = await Promise.all([
       api.config(),
-      api.settings.list(),
       api.session(),
     ])
     config.value = configResponse
-    settings.value = settingsResponse.settings || {}
     session.value = sessionResponse
+    try {
+      const settingsResponse = await api.settings.list()
+      settings.value = settingsResponse.settings || {}
+    } catch {
+      settings.value = {}
+    }
     form.value = {
       rollback_policy: settings.value.rollback_policy || configResponse.rollbackPolicy,
       metrics_retention_seconds:
@@ -58,6 +62,17 @@ async function load() {
 }
 
 async function save() {
+  const retention = Number(form.value.metrics_retention_seconds)
+  const sample = Number(form.value.metrics_sample_interval_seconds)
+  const poll = Number(form.value.node_poll_interval_seconds)
+  if (retention < 60 || retention > 2592000) {
+    error.value = 'Retention must be between 60 and 2592000 seconds'
+    return
+  }
+  if (sample < 1 || sample > 3600 || poll < 1 || poll > 3600) {
+    error.value = 'Intervals must be between 1 and 3600 seconds'
+    return
+  }
   saving.value = true
   error.value = null
   try {

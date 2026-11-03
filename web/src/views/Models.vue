@@ -24,6 +24,7 @@ const search = ref('')
 const downloadOpen = ref(false)
 const downloadBusy = ref(false)
 const downloadError = ref(null)
+const downloadNodeErrors = ref([])
 const downloadForm = ref({ repo: '', nodes: [], root: '', revision: '', patterns: '' })
 const activeJobs = ref([])
 const removeTarget = ref(null)
@@ -32,12 +33,13 @@ const cleanupBusy = ref(false)
 
 let refreshTimer = null
 let jobTimer = null
+let jobInFlight = false
 
 const inUseRepos = computed(() => {
   const repos = new Set()
   for (const item of deployments.value) {
     if (item.deployment.status !== 'loaded') continue
-    const model = item.deployment.recipe?.model
+    const model = item.deployment.recipe?.spec?.model
     if (!model) continue
     if (model.repo) repos.add(model.repo)
     for (const extra of model.extraRepos || []) repos.add(extra)
@@ -56,17 +58,18 @@ const nodeEntries = computed(() => {
 })
 
 const totals = computed(() => {
-  let cached = 0
-  let partial = 0
-  let bytes = 0
+  const cachedRepos = new Set()
+  const partialRepos = new Set()
+  const sizes = new Map()
   for (const entry of catalog.value) {
     for (const model of entry.models?.models || []) {
-      if (model.cached) cached += 1
-      if (model.partial) partial += 1
-      bytes += Number(model.size_bytes || 0)
+      if (model.cached) cachedRepos.add(model.repo)
+      if (model.partial) partialRepos.add(model.repo)
+      sizes.set(model.repo, Math.max(sizes.get(model.repo) || 0, Number(model.size_bytes || 0)))
     }
   }
-  return { cached, partial, bytes }
+  const bytes = [...sizes.values()].reduce((sum, value) => sum + value, 0)
+  return { cached: cachedRepos.size, partial: partialRepos.size, bytes }
 })
 
 const activeCount = computed(
@@ -100,14 +103,13 @@ async function load() {
 function openDownload(repo = '', nodeId = null) {
   downloadForm.value = {
     repo,
-    nodes: nodeId
-      ? [nodeId]
-      : catalog.value.map((entry) => entry.node_id),
+    nodes: nodeId ? [nodeId] : [],
     root: '',
     revision: '',
     patterns: '',
   }
   activeJobs.value = []
+  downloadNodeErrors.value = []
   downloadError.value = null
   downloadOpen.value = true
 }
@@ -134,6 +136,7 @@ async function submitDownload() {
       revision: downloadForm.value.revision.trim() || undefined,
       allowPatterns: patterns.length ? patterns : undefined,
     })
+    downloadNodeErrors.value = response.errors || []
     activeJobs.value = (response.jobs || []).map((job) => ({
       node_id: job.node_id,
       id: job.job_id,
@@ -143,6 +146,7 @@ async function submitDownload() {
       files_total: null,
       bytes_done: 0,
       bytes_total: null,
+      misses: 0,
     }))
     startJobPolling()
   } catch (exc) {
@@ -153,33 +157,62 @@ async function submitDownload() {
 }
 
 async function pollJobs() {
+  if (jobInFlight) return
+  jobInFlight = true
   try {
     const response = await api.models.jobs()
     const byKey = new Map(
       activeJobs.value.map((job) => [`${job.node_id}:${job.id}`, job]),
     )
+    const returned = new Set()
     for (const node of response.nodes || []) {
+      if (node.error) {
+        for (const [key, job] of byKey) {
+          if (job.node_id === node.node_id && ['pending', 'running'].includes(job.state)) {
+            byKey.set(key, { ...job, state: 'failed', error: node.error })
+          }
+        }
+        continue
+      }
       for (const job of node.jobs || []) {
         const key = `${node.node_id}:${job.id}`
-        if (byKey.has(key)) byKey.set(key, { ...job, node_id: node.node_id })
+        returned.add(key)
+        if (byKey.has(key)) byKey.set(key, { ...job, node_id: node.node_id, misses: 0 })
+      }
+    }
+    for (const [key, job] of byKey) {
+      if (!returned.has(key) && ['pending', 'running'].includes(job.state)) {
+        const misses = (job.misses || 0) + 1
+        byKey.set(
+          key,
+          misses >= 3
+            ? { ...job, state: 'failed', error: 'job lost (agent restart?)', misses }
+            : { ...job, misses },
+        )
       }
     }
     activeJobs.value = [...byKey.values()]
     if (!activeCount.value) {
-      clearInterval(jobTimer)
       jobTimer = null
       await load()
+      return
     }
   } catch (exc) {
     downloadError.value = exc.message || String(exc)
-    clearInterval(jobTimer)
     jobTimer = null
+    return
+  } finally {
+    jobInFlight = false
+  }
+  if (activeCount.value) {
+    clearTimeout(jobTimer)
+    jobTimer = setTimeout(pollJobs, 2000)
   }
 }
 
 function startJobPolling() {
-  if (jobTimer) clearInterval(jobTimer)
-  jobTimer = setInterval(pollJobs, 2000)
+  if (jobTimer) clearTimeout(jobTimer)
+  jobTimer = setTimeout(pollJobs, 1200)
 }
 
 async function cancelJob(job) {
@@ -211,7 +244,7 @@ async function confirmRemove() {
 
 function askCleanup(entry) {
   const partials = (entry.models?.models || []).filter(
-    (model) => model.partial && !inUseRepos.value.has(model.repo),
+    (model) => model.partial && !model.cached && !inUseRepos.value.has(model.repo),
   )
   if (!partials.length) {
     notice.value = 'No orphaned partial downloads on this node.'
@@ -257,7 +290,7 @@ onMounted(async () => {
 
 onBeforeUnmount(() => {
   if (refreshTimer) clearInterval(refreshTimer)
-  if (jobTimer) clearInterval(jobTimer)
+  if (jobTimer) clearTimeout(jobTimer)
 })
 </script>
 
@@ -380,8 +413,9 @@ onBeforeUnmount(() => {
               <span class="chip" :class="model.cached ? 'chip-live' : model.partial ? 'chip-warn' : ''">
                 <CheckCircle2 v-if="model.cached" class="h-3 w-3" />
                 <AlertTriangle v-else-if="model.partial" class="h-3 w-3" />
-                {{ model.cached ? 'cached' : model.partial ? 'partial' : 'missing' }}
+                {{ model.cached ? 'cached' : model.partial ? 'orphaned' : 'missing' }}
               </span>
+              <span v-if="model.cached && model.partial" class="chip chip-warn">partial blobs</span>
               <span v-if="inUseRepos.has(model.repo)" class="chip chip-warn">in use</span>
               <button
                 v-if="!model.cached"
@@ -465,6 +499,15 @@ onBeforeUnmount(() => {
           </button>
         </div>
         <p v-if="downloadError" class="mt-3 font-mono text-[11px] text-danger">{{ downloadError }}</p>
+        <div v-if="downloadNodeErrors.length" class="mt-3 space-y-1">
+          <p
+            v-for="item in downloadNodeErrors"
+            :key="item.node_id"
+            class="font-mono text-[10px] text-danger"
+          >
+            {{ nodeName(item.node_id) }}: {{ item.error }}
+          </p>
+        </div>
 
         <div v-if="activeJobs.length" class="mt-4 space-y-2">
           <div

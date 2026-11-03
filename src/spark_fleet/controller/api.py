@@ -54,6 +54,20 @@ _NAME_RE = re.compile(NAME_PATTERN)
 _REPO_RE = re.compile(REPO_PATTERN)
 
 
+def _integer_setting(value: str, minimum: int, maximum: int) -> bool:
+    if not (value.isascii() and value.isdigit()):
+        return False
+    return minimum <= int(value) <= maximum
+
+
+_SETTING_RULES = {
+    "rollback_policy": lambda value: value in ("restore", "leave-down"),
+    "metrics_retention_seconds": lambda value: _integer_setting(value, 60, 30 * 86400),
+    "metrics_sample_interval_seconds": lambda value: _integer_setting(value, 1, 3600),
+    "node_poll_interval_seconds": lambda value: _integer_setting(value, 1, 3600),
+}
+
+
 def build_app(
     *,
     db: Database,
@@ -106,14 +120,14 @@ def build_app(
         response.delete_cookie(SESSION_COOKIE_NAME, path="/")
         return {"authenticated": False}
 
-    @app.get("/api/config", dependencies=[Depends(session_dep)])
+    @app.get("/api/config")
     def controller_config() -> dict[str, Any]:
         return {
             "rollbackPolicy": rollback_policy,
             "metricsRetentionSeconds": metrics_retention_seconds,
             "metricsSampleIntervalSeconds": metrics_sample_interval_seconds,
             "nodePollIntervalSeconds": node_poll_interval_seconds,
-            "authEnabled": session_secret is not None,
+            "authEnabled": ui_password is not None,
             "gateway": {
                 "activeAlias": "spark-active",
                 "modelsPath": "/v1/models",
@@ -122,7 +136,7 @@ def build_app(
 
     @app.get("/api/session")
     def session_status(request: Request) -> dict[str, Any]:
-        enabled = session_secret is not None
+        enabled = ui_password is not None
         authenticated = False
         csrf = None
         if enabled:
@@ -242,11 +256,18 @@ def build_app(
         except NodeError as exc:
             raise HTTPException(status_code=404, detail=str(exc)) from exc
         client = client_factory(node.agent_url, agent_token)
+        try:
+            # Probe once so agent-side validation failures become a 502 instead
+            # of a 200 stream that never produces output.
+            await client.container_logs(container_id, tail=1)
+        except AgentError as exc:
+            await client.aclose()
+            raise HTTPException(status_code=502, detail=str(exc)) from exc
 
         async def stream():
             try:
                 async for line in client.follow_container_logs(container_id, tail=tail):
-                    yield line
+                    yield line if line.endswith("\n") else f"{line}\n"
             finally:
                 await client.aclose()
 
@@ -268,7 +289,7 @@ def build_app(
         recipe = _parse_body(body)
         if recipe.metadata.name != name:
             raise HTTPException(status_code=400, detail="recipe name does not match path")
-        _validate_recipe(recipe, recipes_dir, exclude=name, registry=registry)
+        _validate_recipe(recipe, recipes_dir, exclude=name, registry=registry, db=db)
         _write_recipe(recipes_dir, recipe)
         return {"name": name, "yaml": recipe_to_yaml(recipe)}
 
@@ -288,7 +309,9 @@ def build_app(
     @app.post("/api/recipes/validate", dependencies=[Depends(mutation_dep)])
     def validate_recipe(body: Mapping[str, Any]) -> dict[str, Any]:
         recipe = _parse_body(body)
-        _validate_recipe(recipe, recipes_dir, exclude=recipe.metadata.name, registry=registry)
+        _validate_recipe(
+            recipe, recipes_dir, exclude=recipe.metadata.name, registry=registry, db=db
+        )
         try:
             rendered = render_deployment(
                 recipe,
@@ -330,7 +353,7 @@ def build_app(
         if "revision" in body:
             data["spec"]["model"]["revision"] = body["revision"]
         updated = parse_recipe(data)
-        _validate_recipe(updated, recipes_dir, exclude=name, registry=registry)
+        _validate_recipe(updated, recipes_dir, exclude=name, registry=registry, db=db)
         diff = _diff(recipe_to_yaml(recipe), recipe_to_yaml(updated), name)
         if body.get("apply") is True:
             _write_recipe(recipes_dir, updated)
@@ -348,7 +371,7 @@ def build_app(
         if not isinstance(recipe_name, str):
             raise HTTPException(status_code=400, detail="recipe is required")
         recipe = _read_recipe(recipes_dir, recipe_name)
-        _validate_recipe(recipe, recipes_dir, exclude=recipe_name, registry=registry)
+        _validate_recipe(recipe, recipes_dir, exclude=recipe_name, registry=registry, db=db)
         name = body.get("name") or recipe.metadata.name
         if not isinstance(name, str) or not _NAME_RE.fullmatch(name):
             raise HTTPException(status_code=400, detail="invalid deployment name")
@@ -468,11 +491,18 @@ def build_app(
         if not isinstance(container_id, str) or not container_id:
             raise HTTPException(status_code=400, detail="role has no container")
         client = client_factory(node.agent_url, agent_token)
+        try:
+            # Probe once so agent-side validation failures become a 502 instead
+            # of a 200 stream that never produces output.
+            await client.container_logs(container_id, tail=1)
+        except AgentError as exc:
+            await client.aclose()
+            raise HTTPException(status_code=502, detail=str(exc)) from exc
 
         async def stream():
             try:
                 async for line in client.follow_container_logs(container_id, tail=tail):
-                    yield line
+                    yield line if line.endswith("\n") else f"{line}\n"
             finally:
                 await client.aclose()
 
@@ -514,12 +544,20 @@ def build_app(
         node_ids = body.get("nodes")
         if not isinstance(node_ids, list) or not node_ids:
             raise HTTPException(status_code=400, detail="nodes is required")
-        jobs: list[dict[str, str]] = []
+        nodes = []
+        seen: set[str] = set()
         for node_id in node_ids:
+            key = str(node_id)
+            if key in seen:
+                continue
+            seen.add(key)
             try:
-                node = registry.require(str(node_id))
+                nodes.append(registry.require(key))
             except NodeError as exc:
                 raise HTTPException(status_code=404, detail=str(exc)) from exc
+        jobs: list[dict[str, str]] = []
+        errors: list[dict[str, str]] = []
+        for node in nodes:
             client = client_factory(node.agent_url, agent_token)
             try:
                 job_id = await client.start_model_download(
@@ -530,10 +568,10 @@ def build_app(
                 )
                 jobs.append({"node_id": node.id, "job_id": job_id})
             except AgentError as exc:
-                raise HTTPException(status_code=502, detail=str(exc)) from exc
+                errors.append({"node_id": node.id, "error": str(exc)})
             finally:
                 await client.aclose()
-        return {"jobs": jobs}
+        return {"jobs": jobs, "errors": errors}
 
     @app.get("/api/models/jobs", dependencies=[Depends(session_dep)])
     async def list_model_jobs(node_id: str | None = None) -> dict[str, Any]:
@@ -674,6 +712,10 @@ def build_app(
         value = body.get("value")
         if not isinstance(value, str):
             raise HTTPException(status_code=400, detail="value must be a string")
+        if key not in _SETTING_RULES:
+            raise HTTPException(status_code=400, detail=f"unknown setting {key!r}")
+        if not _SETTING_RULES[key](value):
+            raise HTTPException(status_code=400, detail=f"invalid value for {key!r}")
         db.set_setting(key, value)
         return {"key": key, "value": value}
 
@@ -921,7 +963,12 @@ def _list_recipes(recipes_dir: Path) -> list[dict[str, Any]]:
 
 
 def _validate_recipe(
-    recipe: Recipe, recipes_dir: Path, *, exclude: str | None, registry: NodeRegistry
+    recipe: Recipe,
+    recipes_dir: Path,
+    *,
+    exclude: str | None,
+    registry: NodeRegistry,
+    db: Database,
 ) -> None:
     try:
         validate_against_nodes(recipe, [node.id for node in registry.list()])
@@ -932,18 +979,23 @@ def _validate_recipe(
         raise HTTPException(status_code=400, detail="spark-active is reserved")
     if not aliases:
         return
-    for path in recipes_dir.glob("*.yaml") if recipes_dir.is_dir() else ():
-        if path.stem == exclude:
+    # Unloaded recipes may share aliases while being drafted; loading the second
+    # one is rejected by the deployment manager. Only loaded deployments reserve
+    # aliases at recipe-save time.
+    for deployment in db.list_deployments():
+        if deployment["status"] != "loaded" or deployment["recipe_name"] == exclude:
             continue
         try:
-            other = parse_recipe_yaml(path.read_text(encoding="utf-8"))
-        except (OSError, RecipeError):
+            other = parse_recipe(deployment["recipe"])
+        except RecipeError:
             continue
         overlap = aliases & _recipe_aliases(other)
         if overlap:
             raise HTTPException(
                 status_code=409,
-                detail=f"aliases already used by {path.stem}: {', '.join(sorted(overlap))}",
+                detail=(
+                    f"aliases already used by {deployment['name']}: {', '.join(sorted(overlap))}"
+                ),
             )
 
 

@@ -191,12 +191,15 @@ onBeforeUnmount(() => {
           <span class="chip ml-auto">{{ filtered.length }} shown</span>
         </header>
         <div class="max-h-[68vh] overflow-y-auto">
-          <button
+          <div
             v-for="job in filtered"
             :key="job.id"
-            class="flex w-full items-center gap-3 border-b border-edge/60 px-4 py-3 text-left transition last:border-0 hover:bg-raised/40"
+            class="flex w-full cursor-pointer items-center gap-3 border-b border-edge/60 px-4 py-3 text-left transition last:border-0 hover:bg-raised/40"
             :class="selected?.id === job.id ? 'bg-cyan/[0.05]' : ''"
+            role="button"
+            tabindex="0"
             @click="selectJob(job)"
+            @keydown.enter="selectJob(job)"
           >
             <span
               class="grid h-8 w-8 place-items-center rounded-md border"
@@ -234,7 +237,7 @@ onBeforeUnmount(() => {
             >
               <Ban class="h-3.5 w-3.5" />
             </button>
-          </button>
+          </div>
           <p v-if="!filtered.length" class="px-4 py-10 text-center font-mono text-[11px] text-faint">
             No jobs match this filter.
           </p>

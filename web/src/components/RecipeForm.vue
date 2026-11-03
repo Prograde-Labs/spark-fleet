@@ -41,8 +41,11 @@ function addRole() {
     class: 'heavy',
     startOrder: heavy === 0 ? 20 : 10,
     inferencePort: heavy === 0 ? 8888 : null,
-    readiness: { type: heavy === 0 ? 'http' : 'running', timeoutSeconds: 3600 },
-    service: { image: '', network_mode: 'host' },
+    readiness:
+      heavy === 0
+        ? { type: 'http', path: '/v1/models', timeoutSeconds: 3600 }
+        : { type: 'running', timeoutSeconds: 3600 },
+    service: { image: '', network_mode: 'host', volumes: [] },
   })
 }
 
@@ -312,6 +315,14 @@ function setReadinessType(role, type) {
             <div>
               <label class="hud-label">Shared memory</label>
               <input v-model="role.service.shm_size" class="input mt-1" placeholder="32gb" />
+            </div>
+            <div>
+              <label class="hud-label">Volumes (one per line)</label>
+              <textarea
+                class="input mt-1 h-16"
+                :value="listText(role.service.volumes)"
+                @input="setList(role.service, 'volumes', $event.target.value)"
+              />
             </div>
             <div>
               <label class="hud-label">Ports (one per line)</label>

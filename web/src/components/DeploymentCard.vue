@@ -30,7 +30,7 @@ const loaded = computed(() => deployment.value.status === 'loaded')
 const pending = computed(() =>
   ['pending', 'loading', 'starting'].includes(deployment.value.status),
 )
-const isBusy = computed(() => props.busy === deployment.value.id)
+const isBusy = computed(() => Boolean(props.busy))
 const canBePrimary = computed(
   () => loaded.value && deployment.value.mode === 'deployment',
 )
@@ -163,7 +163,9 @@ function askDelete() {
         <span class="font-mono text-[10px] uppercase tracking-[0.14em] text-cyan-soft">
           {{ job.phase || job.status || 'working' }}
         </span>
-        <span class="truncate font-mono text-[10px] text-dim">{{ job.message || '' }}</span>
+        <span class="truncate font-mono text-[10px] text-dim">
+          {{ job.error || job.result?.message || job.message || '' }}
+        </span>
         <span class="ml-auto font-mono text-[9px] text-faint">{{ shortId(job.id, 6) }}</span>
       </div>
 

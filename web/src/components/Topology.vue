@@ -60,7 +60,7 @@ function nodeTone(node) {
           <div>
             <p class="text-sm font-semibold">spark-fleet</p>
             <p class="font-mono text-[9px] uppercase tracking-[0.16em] text-faint">
-              Controller · 192.0.2.239:8091
+              Controller · mission control
             </p>
           </div>
         </div>

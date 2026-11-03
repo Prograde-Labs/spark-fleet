@@ -211,6 +211,10 @@ def load_controller_config(env: Mapping[str, str] | None = None) -> ControllerCo
         raise ConfigError(
             "SPARK_FLEET_SESSION_SECRET is required when SPARK_FLEET_UI_PASSWORD is set"
         )
+    if ui_password is None and session_secret is not None:
+        raise ConfigError(
+            "SPARK_FLEET_UI_PASSWORD is required when SPARK_FLEET_SESSION_SECRET is set"
+        )
     if session_secret is not None and len(session_secret) < MIN_SESSION_SECRET_LENGTH:
         raise ConfigError(
             f"SPARK_FLEET_SESSION_SECRET must be at least {MIN_SESSION_SECRET_LENGTH} characters"

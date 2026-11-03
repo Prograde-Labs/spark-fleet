@@ -87,6 +87,12 @@ async function request(path, { method = 'GET', body, headers = {}, signal } = {}
   }
 
   if (!response.ok) {
+    if (response.status === 401 && path !== '/api/login') {
+      clearCsrf()
+      if (typeof window !== 'undefined' && window.location.hash !== '#/login') {
+        window.location.hash = '#/login'
+      }
+    }
     const detail =
       payload && typeof payload === 'object' && payload.detail
         ? String(payload.detail)

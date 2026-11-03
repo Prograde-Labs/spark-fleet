@@ -30,7 +30,7 @@ const createError = ref(null)
 const newDeployment = ref({ recipe: '', name: '', primary: false })
 
 let refreshTimer = null
-const pollers = new Map()
+let unmounted = false
 
 const filtered = computed(() => {
   const term = search.value.trim().toLowerCase()
@@ -95,18 +95,21 @@ async function trackJob(deploymentId, jobId) {
   const started = Date.now()
   while (Date.now() - started < 60 * 60 * 1000) {
     await sleep(1500)
+    if (unmounted) return
     try {
       const response = await api.jobs.get(jobId)
       const job = response.job || {}
       jobs.value = { ...jobs.value, [deploymentId]: job }
       if (['succeeded', 'failed', 'cancelled'].includes(job.status)) {
-        if (job.status === 'failed') {
+        const failed = job.status === 'failed'
+        await load()
+        if (failed) {
           error.value = job.error || `${job.kind} failed`
         } else {
           notice.value = `${job.kind} ${statusLabel(job.status)}`
         }
-        await load()
         setTimeout(() => {
+          if (unmounted) return
           const next = { ...jobs.value }
           delete next[deploymentId]
           jobs.value = next
@@ -207,8 +210,8 @@ onMounted(async () => {
 })
 
 onBeforeUnmount(() => {
+  unmounted = true
   if (refreshTimer) clearInterval(refreshTimer)
-  for (const timer of pollers.values()) clearTimeout(timer)
 })
 </script>
 

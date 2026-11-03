@@ -3,6 +3,7 @@ import { onMounted, ref } from 'vue'
 import { useRouter } from 'vue-router'
 import { ArrowLeft, Cpu, KeyRound, Lock, ShieldCheck, ShieldOff } from 'lucide-vue-next'
 import { api } from '../api'
+import { startEvents, stopEvents } from '../stores/events'
 
 const router = useRouter()
 const session = ref(null)
@@ -30,7 +31,11 @@ async function submit() {
     await api.login(password.value)
     password.value = ''
     await loadSession()
-    if (authenticated.value) router.push('/')
+    if (authenticated.value) {
+      stopEvents()
+      startEvents()
+      router.push('/')
+    }
   } catch (exc) {
     error.value = exc.message || String(exc)
   } finally {

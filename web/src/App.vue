@@ -1,5 +1,5 @@
 <script setup>
-import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
+import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { api } from './api'
 import { formatRelative } from './format'
@@ -81,6 +81,17 @@ onMounted(async () => {
     session.value = { enabled: false, authenticated: false, offline: true }
   }
 })
+
+watch(
+  () => route.fullPath,
+  async () => {
+    try {
+      session.value = await api.session()
+    } catch {
+      /* keep the last known session state */
+    }
+  },
+)
 
 onBeforeUnmount(() => {
   stopEvents()
@@ -252,7 +263,7 @@ router.afterEach(() => {
             <span class="h-1.5 w-1.5 rounded-full bg-violet" />
             {{
               eventState.lastEventAt
-                ? `Telemetry ${formatRelative(eventState.lastEventAt, now.getTime())}`
+                ? `Telemetry ${formatRelative(eventState.lastEventAt / 1000, now.getTime())}`
                 : 'Awaiting telemetry'
             }}
           </span>

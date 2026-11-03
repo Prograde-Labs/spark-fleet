@@ -135,6 +135,9 @@ async function checkNode(node) {
   try {
     checks.value = { ...checks.value, [node.id]: await api.nodes.check(node.id) }
     await load()
+    if (selected.value?.id === node.id) {
+      selected.value = nodes.value.find((item) => item.id === node.id) || selected.value
+    }
   } catch (exc) {
     error.value = exc.message || String(exc)
   }
@@ -150,6 +153,9 @@ async function deleteNode(node) {
     await api.nodes.remove(node.id)
     notice.value = `Removed ${node.id}`
     if (selected.value?.id === node.id) detailOpen.value = false
+    const nextChecks = { ...checks.value }
+    delete nextChecks[node.id]
+    checks.value = nextChecks
     await load()
   } catch (exc) {
     error.value = exc.message || String(exc)

@@ -1,4 +1,5 @@
 import { createRouter, createWebHashHistory } from 'vue-router'
+import { api } from './api'
 
 const routes = [
   {
@@ -65,6 +66,17 @@ const router = createRouter({
   history: createWebHashHistory(),
   routes,
   scrollBehavior: () => ({ top: 0 }),
+})
+
+router.beforeEach(async (to) => {
+  if (to.meta?.layout === 'bare') return true
+  try {
+    const session = await api.session()
+    if (session.enabled && !session.authenticated) return { name: 'login' }
+  } catch {
+    // Controller unreachable: let the view show its own error state.
+  }
+  return true
 })
 
 router.afterEach((to) => {

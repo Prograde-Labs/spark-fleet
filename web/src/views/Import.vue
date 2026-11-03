@@ -1,5 +1,5 @@
 <script setup>
-import { computed, onMounted, ref } from 'vue'
+import { computed, onMounted, ref, watch } from 'vue'
 import {
   AlertTriangle,
   ArrowRight,
@@ -93,6 +93,14 @@ async function apply() {
 function toggleYaml(index) {
   expanded.value = { ...expanded.value, [index]: !expanded.value[index] }
 }
+
+watch(
+  sources,
+  () => {
+    confirmed.value = false
+  },
+  { deep: true },
+)
 
 onMounted(loadNodes)
 </script>

@@ -41,8 +41,11 @@ let ticker = null
 const loadedDeployments = computed(() =>
   deployments.value.filter((item) => item.deployment.status === 'loaded'),
 )
+const primaryCandidates = computed(() =>
+  loadedDeployments.value.filter((item) => item.deployment.mode === 'deployment'),
+)
 const primaryDeployment = computed(
-  () => loadedDeployments.value.find((item) => item.deployment.is_primary) || null,
+  () => primaryCandidates.value.find((item) => item.deployment.is_primary) || null,
 )
 const cacheMax = computed(() =>
   Math.max(
@@ -297,9 +300,9 @@ onBeforeUnmount(() => {
           </header>
           <div class="divider my-4" />
 
-          <div v-if="loadedDeployments.length" class="space-y-2">
+          <div v-if="primaryCandidates.length" class="space-y-2">
             <button
-              v-for="item in loadedDeployments"
+              v-for="item in primaryCandidates"
               :key="item.deployment.id"
               class="group flex w-full items-center gap-3 rounded-lg border px-3 py-2.5 text-left transition"
               :class="

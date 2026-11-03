@@ -19,6 +19,7 @@ let controller = null
 async function start() {
   stop()
   error.value = null
+  text.value = ''
   following.value = true
   controller = new AbortController()
   try {
@@ -50,6 +51,7 @@ async function start() {
       await nextTick()
       if (stick.value) scrollToEnd()
     }
+    text.value += decoder.decode()
   } catch (exc) {
     if (exc.name !== 'AbortError') error.value = String(exc)
   } finally {
