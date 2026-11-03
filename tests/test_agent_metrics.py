@@ -924,7 +924,7 @@ def test_cache_filesystem_usage_uses_default_disk_usage(tmp_path):
 
     assert error is None
     assert total == usage.total
-    assert 0 <= free <= total
+    assert abs(free - usage.free) <= usage.total * 1e-3
 
 
 def test_cache_filesystem_usage_keeps_five_errors_without_suffix(tmp_path):
@@ -1161,13 +1161,18 @@ def test_collect_metrics_reports_unknown_cache_bytes_without_error_text(tmp_path
     assert "cache bytes unavailable" in snapshot.errors["cache"]
 
 
-def test_collect_metrics_nulls_half_known_capacity(tmp_path):
+@pytest.mark.parametrize(
+    "capacity",
+    [(1000, None, None), (None, 250, None)],
+    ids=["total-only", "free-only"],
+)
+def test_collect_metrics_nulls_half_known_capacity(tmp_path, capacity):
     snapshot = collect_metrics(
         [tmp_path / "hub"],
         meminfo_path=write_meminfo(tmp_path),
         container_sampler=lambda: [],
         cache_sampler=lambda: 500,
-        cache_usage_sampler=lambda: (1000, None, None),
+        cache_usage_sampler=lambda: capacity,
         gpu_sampler=lambda: ((), None),
     )
 
@@ -1176,13 +1181,20 @@ def test_collect_metrics_nulls_half_known_capacity(tmp_path):
     assert "cache capacity unknown" in snapshot.errors["cache"]
 
 
-def test_collect_metrics_nulls_half_known_capacity_beside_partial_error(tmp_path):
+@pytest.mark.parametrize(
+    "capacity",
+    [(1000, None, "one root failed"), (None, 250, "one root failed")],
+    ids=["total-only", "free-only"],
+)
+def test_collect_metrics_nulls_half_known_capacity_beside_partial_error(
+    tmp_path, capacity
+):
     snapshot = collect_metrics(
         [tmp_path / "hub"],
         meminfo_path=write_meminfo(tmp_path),
         container_sampler=lambda: [],
         cache_sampler=lambda: 500,
-        cache_usage_sampler=lambda: (1000, None, "one root failed"),
+        cache_usage_sampler=lambda: capacity,
         gpu_sampler=lambda: ((), None),
     )
 

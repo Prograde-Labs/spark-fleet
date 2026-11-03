@@ -213,10 +213,20 @@ def test_record_node_snapshot_skips_missing_and_invalid_values(store):
     assert store.latest_node_metrics("spark-01") == {CACHE_BYTES: 10.0}
 
 
-def test_record_node_snapshot_requires_both_capacity_values(store):
+@pytest.mark.parametrize(
+    "capacity",
+    [
+        {CACHE_TOTAL: 1000},
+        {CACHE_FREE: 4000},
+        {CACHE_TOTAL: 1000, CACHE_FREE: True},
+        {CACHE_TOTAL: True, CACHE_FREE: 4000},
+    ],
+    ids=["total-only", "free-only", "free-bool", "total-bool"],
+)
+def test_record_node_snapshot_requires_both_capacity_values(store, capacity):
     store.record_node_snapshot(
         "spark-01",
-        {CACHE_BYTES: 10, CACHE_TOTAL: 1000},
+        {CACHE_BYTES: 10, **capacity},
         ts=1234.0,
     )
 
