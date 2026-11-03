@@ -237,6 +237,7 @@ async def test_models_prefers_recipe_context_over_upstream(db):
 
     assert calls == []
     assert {item["max_model_len"] for item in body["data"]} == {524288}
+    assert {item["context_length"] for item in body["data"]} == {524288}
 
 
 async def test_models_falls_back_to_upstream_max_model_len(db):
@@ -274,6 +275,7 @@ async def test_models_falls_back_to_upstream_context_length(db):
         body = await gateway.models()
 
     assert {item["max_model_len"] for item in body["data"]} == {850000}
+    assert {item["context_length"] for item in body["data"]} == {850000}
 
 
 async def test_models_falls_back_to_llamacpp_meta_n_ctx(db):
@@ -325,6 +327,7 @@ async def test_models_falls_back_to_llamacpp_meta_n_ctx_train(db):
         body = await gateway.models()
 
     assert {item["max_model_len"] for item in body["data"]} == {131072}
+    assert {item["context_length"] for item in body["data"]} == {131072}
 
 
 async def test_models_reads_llamacpp_meta_from_single_upstream_entry(db):
@@ -343,6 +346,7 @@ async def test_models_reads_llamacpp_meta_from_single_upstream_entry(db):
         body = await gateway.models()
 
     assert {item["max_model_len"] for item in body["data"]} == {65536}
+    assert {item["context_length"] for item in body["data"]} == {65536}
 
 
 async def test_models_falls_back_to_single_upstream_entry(db):
@@ -358,6 +362,7 @@ async def test_models_falls_back_to_single_upstream_entry(db):
         body = await gateway.models()
 
     assert {item["max_model_len"] for item in body["data"]} == {4096}
+    assert {item["context_length"] for item in body["data"]} == {4096}
 
 
 async def test_models_matches_upstream_entry_by_served_name(db):
@@ -396,6 +401,7 @@ async def test_models_matches_upstream_entry_by_served_name(db):
         "demo-glm": 262144,
         "other": 850000,
     }
+    assert {item["context_length"] for item in body["data"]} == {262144, 850000}
 
 
 async def test_models_does_not_guess_context_for_multi_model_upstream(db):
@@ -474,6 +480,27 @@ async def test_models_omits_context_when_upstream_fails(db):
                 "data": [{"id": "Demo-Model-B", "meta": {"n_ctx_train": "131072"}}],
             },
         ),
+        httpx.Response(
+            200, json={"object": "list", "data": [{"id": "Demo-Model-B", "meta": {"n_ctx": -1}}]}
+        ),
+        httpx.Response(
+            200, json={"object": "list", "data": [{"id": "Demo-Model-B", "meta": {"n_ctx": 1.5}}]}
+        ),
+        httpx.Response(
+            200,
+            json={"object": "list", "data": [{"id": "Demo-Model-B", "meta": {"n_ctx_train": -1}}]},
+        ),
+        httpx.Response(
+            200,
+            json={
+                "object": "list",
+                "data": [{"id": "Demo-Model-B", "meta": {"n_ctx": 0, "n_ctx_train": 131072}}],
+            },
+        ),
+        httpx.Response(
+            200,
+            json={"object": "list", "data": [{"id": "/models/x.gguf", "meta": {"n_ctx": 0}}]},
+        ),
     ],
 )
 async def test_models_omits_context_for_bad_upstream_payload(db, response):
@@ -507,6 +534,7 @@ async def test_models_ignores_non_mapping_upstream_entries(db):
         body = await gateway.models()
 
     assert {item["max_model_len"] for item in body["data"]} == {4096}
+    assert {item["context_length"] for item in body["data"]} == {4096}
 
 
 async def test_models_caches_upstream_context_lookups(db):
@@ -527,6 +555,8 @@ async def test_models_caches_upstream_context_lookups(db):
     assert len(calls) == 1
     assert {item["max_model_len"] for item in first["data"]} == {262144}
     assert {item["max_model_len"] for item in second["data"]} == {262144}
+    assert {item["context_length"] for item in first["data"]} == {262144}
+    assert {item["context_length"] for item in second["data"]} == {262144}
 
 
 async def test_models_cache_expires(db, monkeypatch):
@@ -553,6 +583,9 @@ async def test_models_cache_expires(db, monkeypatch):
     assert {item["max_model_len"] for item in first["data"]} == {262144}
     assert {item["max_model_len"] for item in second["data"]} == {262144}
     assert {item["max_model_len"] for item in third["data"]} == {262144}
+    assert {item["context_length"] for item in first["data"]} == {262144}
+    assert {item["context_length"] for item in second["data"]} == {262144}
+    assert {item["context_length"] for item in third["data"]} == {262144}
 
 
 async def test_models_retries_upstream_after_a_failed_lookup(db, monkeypatch):
@@ -582,9 +615,12 @@ async def test_models_retries_upstream_after_a_failed_lookup(db, monkeypatch):
     assert len(calls) == 2
     for item in first["data"]:
         assert "max_model_len" not in item
+        assert "context_length" not in item
     for item in second["data"]:
         assert "max_model_len" not in item
+        assert "context_length" not in item
     assert {item["max_model_len"] for item in third["data"]} == {262144}
+    assert {item["context_length"] for item in third["data"]} == {262144}
 
 
 async def test_models_prunes_stale_context_cache(db):
@@ -619,6 +655,8 @@ async def test_models_prunes_stale_context_cache(db):
         body = await gateway.models()
 
     assert [item["id"] for item in body["data"]] == ["OTHER", "other"]
+    assert {item["max_model_len"] for item in body["data"]} == {262144}
+    assert {item["context_length"] for item in body["data"]} == {262144}
     assert len(gateway._context_cache) == 1
     assert ("http://192.0.2.79:8889", "OTHER") in gateway._context_cache
 

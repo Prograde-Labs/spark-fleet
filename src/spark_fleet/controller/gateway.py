@@ -404,10 +404,20 @@ class FleetGateway:
             # the vLLM-style top-level keys.
             meta = entry.get("meta")
             if isinstance(meta, Mapping):
-                for key in ("n_ctx", "n_ctx_train"):
-                    value = meta.get(key)
-                    if isinstance(value, int) and not isinstance(value, bool) and value > 0:
+                if "n_ctx" in meta:
+                    value = meta["n_ctx"]
+                    if (
+                        isinstance(value, int)
+                        and not isinstance(value, bool)
+                        and value > 0
+                    ):
                         return value
+                    # An unusable n_ctx means the serving limit is unknown;
+                    # falling back to the training limit would overstate it.
+                    return None
+                value = meta.get("n_ctx_train")
+                if isinstance(value, int) and not isinstance(value, bool) and value > 0:
+                    return value
         return None
 
     async def proxy(
