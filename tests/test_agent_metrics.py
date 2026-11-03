@@ -1,5 +1,6 @@
 """Tests for agent metrics sampling, GPU parsing, and the snapshot endpoint."""
 
+import os
 import shutil
 import stat
 import subprocess
@@ -649,11 +650,46 @@ def test_cache_disk_usage_dedupes_nested_roots_before_walking(tmp_path, monkeypa
 
     monkeypatch.setattr(metrics.os, "walk", fake_walk)
 
-    total, error = cache_disk_usage([root, nested])
+    total, error = cache_disk_usage([nested, root])
 
     assert total == 4
     assert error is None
     assert walk_calls == [str(root)]
+
+
+def test_cache_disk_usage_reports_missing_and_non_directory_roots(tmp_path):
+    missing = tmp_path / "missing"
+    file_root = tmp_path / "file"
+    file_root.write_bytes(b"x")
+    root = tmp_path / "hub"
+    root.mkdir()
+    (root / "file").write_bytes(b"1234")
+
+    total, error = cache_disk_usage([missing, file_root, root])
+
+    assert total == 4
+    assert f"{missing}: not found" in error
+    assert f"{file_root}: not a directory" in error
+
+
+def test_cache_disk_usage_records_directory_stat_error(tmp_path, monkeypatch):
+    root = tmp_path / "hub"
+    nested = root / "nested"
+    nested.mkdir(parents=True)
+    (nested / "file").write_bytes(b"1234")
+    real_stat = os.stat
+
+    def fake_stat(path, *args, **kwargs):
+        if Path(path) == nested:
+            raise OSError("dir stat failed")
+        return real_stat(path, *args, **kwargs)
+
+    monkeypatch.setattr(metrics.os, "stat", fake_stat)
+
+    total, error = cache_disk_usage([root])
+
+    assert total == 0
+    assert "dir stat failed" in error
 
 
 def test_cache_disk_usage_dedupes_hardlinked_files(tmp_path):
@@ -849,8 +885,23 @@ def test_cache_filesystem_usage_summarizes_many_errors(tmp_path):
     assert "... and 2 more" in error
 
 
+def test_cache_filesystem_usage_caps_root_prefix(tmp_path):
+    roots = [tmp_path / f"root-{index}" for index in range(7)]
+
+    def fake_stat(path):
+        raise FileNotFoundError(path)
+
+    total, free, error = cache_filesystem_usage(roots, stat=fake_stat)
+
+    assert (total, free) == (None, None)
+    assert "no usable cache root" in error
+    assert "root-4" in error
+    assert "root-5" not in error
+    assert "... and 2 more" in error
+
+
 def test_cache_filesystem_usage_keeps_five_errors_without_suffix(tmp_path):
-    roots = [tmp_path / f"root-{index}" for index in range(4)]
+    roots = [tmp_path / f"root-{index}" for index in range(5)]
 
     def fake_stat(path):
         raise OSError(f"error {path.name}")
@@ -859,7 +910,7 @@ def test_cache_filesystem_usage_keeps_five_errors_without_suffix(tmp_path):
 
     assert (total, free) == (None, None)
     assert "no usable cache root" in error
-    assert "error root-3" in error
+    assert "error root-4" in error
     assert "more" not in error
 
 

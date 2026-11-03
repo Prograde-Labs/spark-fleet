@@ -297,6 +297,13 @@ class _ErrorLog:
         return text
 
 
+def _root_list(roots: Sequence[Path], *, limit: int = 5) -> str:
+    names = [str(root) for root in roots]
+    if len(names) <= limit:
+        return ", ".join(names)
+    return ", ".join(names[:limit]) + f", ... and {len(names) - limit} more"
+
+
 def cache_disk_usage(roots: Sequence[Path]) -> tuple[int, str | None]:
     """Sum inode-deduplicated cache bytes and report unreadable subtrees."""
 
@@ -307,16 +314,22 @@ def cache_disk_usage(roots: Sequence[Path]) -> tuple[int, str | None]:
     for root in sorted(roots, key=lambda path: len(path.parts)):
         try:
             info = root.stat()
-        except OSError:
+        except FileNotFoundError:
+            errors.add(f"{root}: not found")
+            continue
+        except OSError as exc:
+            errors.add(f"{root}: {_error_text(exc)}")
             continue
         if not S_ISDIR(info.st_mode):
+            errors.add(f"{root}: not a directory")
             continue
         if (info.st_dev, info.st_ino) in walked:
             continue
         for dirpath, _dirnames, filenames in os.walk(root, onerror=errors.add):
             try:
                 dir_info = os.stat(dirpath)
-            except OSError:
+            except OSError as exc:
+                errors.add(exc)
                 continue
             walked.add((dir_info.st_dev, dir_info.st_ino))
             for filename in filenames:
@@ -376,7 +389,7 @@ def cache_filesystem_usage(
     if not roots:
         prefix = "no cache roots configured"
     elif resolved == 0:
-        prefix = "no usable cache root: " + ", ".join(str(root) for root in roots)
+        prefix = "no usable cache root: " + _root_list(roots)
     else:
         prefix = None
     if prefix is not None:
