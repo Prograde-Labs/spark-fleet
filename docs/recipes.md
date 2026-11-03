@@ -37,7 +37,9 @@ spec:
 Every role needs `name`, `node`, `class` (`heavy` or `light`), and `service`.
 A deployment must contain at least one heavy role, and no node may host two heavy
 roles in the same recipe. Service recipes have exactly one light role and no
-gateway aliases.
+gateway aliases. Use the explicit GPU device-request form shown below: the
+`gpus: all` shorthand is accepted by newer Compose releases but the agent's
+bundled Compose requires a list.
 
 ```yaml
 roles:
@@ -51,7 +53,10 @@ roles:
     service:
       image: vllm/vllm-openai:latest
       network_mode: host
-      gpus: all
+      gpus:
+        - driver: nvidia
+          count: all
+          capabilities: [gpu]
       ipc: host
       shm_size: 32gb
       environment:
@@ -71,7 +76,10 @@ roles:
     service:
       image: vllm/vllm-openai:latest
       network_mode: host
-      gpus: all
+      gpus:
+        - driver: nvidia
+          count: all
+          capabilities: [gpu]
       ipc: host
       shm_size: 32gb
       environment:

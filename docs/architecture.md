@@ -113,6 +113,13 @@ can conflate alternative configs that share one rendezvous port; and
 `light`-classed worker ranks are treated as services. Review the plan and
 correct recipe roles and served names before loading.
 
+The live `demo-heavy` deployment is fleet-owned: its containers carry
+`spark.fleet.*` labels, so startup reconciliation keeps it loaded across
+controller restarts and no adoption step is needed. Readiness for HTTP and TCP
+roles fails fast when the role container has exited, died, or is restarting
+instead of waiting out the full timeout, and compose up/down calls use a longer
+client timeout so large model containers can shut down cleanly.
+
 ### Adopted deployments (zero-downtime controller switch)
 
 A running legacy-controller heavy can stay live while the controller is replaced by
