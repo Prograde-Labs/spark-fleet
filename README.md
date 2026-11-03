@@ -136,6 +136,6 @@ mount only the Docker socket plus narrow data and model-cache paths. See
 
 ## Status
 
-v1 under active construction. The controller, agents, gateway, importer, UI,
-packaging, and static verification are in place; live GPU smoke tests and
-cutover run on the ARM64 DGX Spark.
+The controller, agents, gateway, importer, mission-control UI, packaging,
+docs, and example recipes are implemented and covered by the test suite.
+GPU smoke tests and image builds run on ARM64 DGX Spark hardware.
