@@ -7,6 +7,9 @@ services:
       target: agent
     image: spark-fleet-agent:local
     network_mode: host
+    # NVML hides compute processes from a private PID namespace, so the agent
+    # cannot report GB10 residency or compute-app memory without this.
+    pid: host
     restart: unless-stopped
     security_opt:
       - no-new-privileges:true

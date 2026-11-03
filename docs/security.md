@@ -46,7 +46,11 @@ enable it. Setting only one is a configuration error.
 - Agents mount the Docker socket because they execute Compose on their node.
 - Agent containers use host networking so recipe-declared inference ports and
   host-network workloads work directly. They are not privileged and do not add
-  host PID/IPC namespaces, devices, or broad host-home mounts.
+  an IPC namespace, devices, or broad host-home mounts. The agent does share the
+  host PID namespace because NVML hides compute processes from a private PID
+  namespace, which would make GB10 residency and compute-app memory telemetry
+  report a false idle state. The Docker socket already gives the agent
+  node-root-equivalent control, so this does not materially widen its trust.
 - Both stacks drop all capabilities. The controller re-adds only `CHOWN`,
   `SETUID`, `SETGID`, and `DAC_OVERRIDE` so its entrypoint can prepare mounted
   data directories and drop to uid 10001. The agent re-adds only

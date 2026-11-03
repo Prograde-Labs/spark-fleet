@@ -59,6 +59,8 @@ def test_agent_compose_has_narrow_mounts_and_no_extra_privileges():
     assert service["cap_add"] == ["DAC_OVERRIDE"]
     assert service["gpus"] == "all"
     assert "no-new-privileges:true" in service["security_opt"]
+    # Host PID is required for nvidia-smi/NVML compute-app visibility on GB10.
+    assert service["pid"] == "host"
     volumes = service.get("volumes", [])
     assert "/var/run/docker.sock:/var/run/docker.sock" in volumes
     assert any("/var/lib/spark-fleet-agent" in volume for volume in volumes)
@@ -66,7 +68,6 @@ def test_agent_compose_has_narrow_mounts_and_no_extra_privileges():
 
     forbidden = {
         "privileged",
-        "pid",
         "ipc",
         "devices",
         "userns_mode",

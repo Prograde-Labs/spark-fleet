@@ -73,7 +73,9 @@ with `npm run dev` (Vite proxies `/api`, `/v1`, and `/events` to
 `127.0.0.1:8091`).
 
 GPU telemetry requires the NVIDIA container toolkit on the node; the agent
-Compose stack requests `gpus: all` so `nvidia-smi` is available for metrics.
+Compose stack requests `gpus: all` so `nvidia-smi` is available for metrics, and
+shares the host PID namespace so NVML can see compute-app processes for GB10
+residency and compute-memory reporting.
 
 ## Development
 
