@@ -1,0 +1,41 @@
+name: spark-fleet-controller
+
+services:
+  controller:
+    build:
+      context: .
+      target: controller
+    image: spark-fleet-controller:local
+    network_mode: host
+    restart: unless-stopped
+    env_file:
+      - path: .env
+        required: false
+    environment:
+      SPARK_FLEET_CONTROLLER_HOST: ${SPARK_FLEET_CONTROLLER_HOST:-0.0.0.0}
+      SPARK_FLEET_CONTROLLER_PORT: ${SPARK_FLEET_CONTROLLER_PORT:-8091}
+      SPARK_FLEET_AGENT_TOKEN: ${SPARK_FLEET_AGENT_TOKEN:?set SPARK_FLEET_AGENT_TOKEN}
+      SPARK_FLEET_DATA_DIR: /var/lib/spark-fleet
+      SPARK_FLEET_RECIPES_DIR: /var/lib/spark-fleet/recipes
+      SPARK_FLEET_DB_PATH: /var/lib/spark-fleet/fleet.sqlite
+      SPARK_FLEET_WEB_DIST: /app/web
+      SPARK_FLEET_ROLLBACK_POLICY: ${SPARK_FLEET_ROLLBACK_POLICY:-restore}
+      SPARK_FLEET_METRICS_RETENTION_SECONDS: ${SPARK_FLEET_METRICS_RETENTION_SECONDS:-86400}
+      SPARK_FLEET_METRICS_SAMPLE_INTERVAL_SECONDS: ${SPARK_FLEET_METRICS_SAMPLE_INTERVAL_SECONDS:-10}
+      SPARK_FLEET_NODE_POLL_INTERVAL_SECONDS: ${SPARK_FLEET_NODE_POLL_INTERVAL_SECONDS:-15}
+      SPARK_FLEET_LOG_LEVEL: ${SPARK_FLEET_LOG_LEVEL:-INFO}
+    volumes:
+      - ${SPARK_FLEET_DATA_DIR:-./data}:/var/lib/spark-fleet
+      - ${SPARK_FLEET_RECIPES_DIR:-./recipes}:/var/lib/spark-fleet/recipes
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "python",
+          "-c",
+          "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8091/health', timeout=3)",
+        ]
+      interval: 20s
+      timeout: 5s
+      retries: 3
+      start_period: 20s

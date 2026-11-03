@@ -1,0 +1,35 @@
+name: spark-fleet-agent
+
+services:
+  agent:
+    build:
+      context: .
+      target: agent
+    image: spark-fleet-agent:local
+    network_mode: host
+    restart: unless-stopped
+    environment:
+      SPARK_FLEET_AGENT_HOST: ${SPARK_FLEET_AGENT_HOST:-0.0.0.0}
+      SPARK_FLEET_AGENT_PORT: ${SPARK_FLEET_AGENT_PORT:-8092}
+      SPARK_FLEET_AGENT_NODE_ID: ${SPARK_FLEET_AGENT_NODE_ID:-}
+      SPARK_FLEET_AGENT_TOKEN: ${SPARK_FLEET_AGENT_TOKEN:?set SPARK_FLEET_AGENT_TOKEN}
+      SPARK_FLEET_AGENT_DATA_DIR: /var/lib/spark-fleet-agent
+      SPARK_FLEET_COMPOSE_PROJECTS_DIR: /var/lib/spark-fleet-agent/projects
+      SPARK_FLEET_MODEL_CACHE_ROOTS: ${SPARK_FLEET_MODEL_CACHE_ROOTS:-/srv/spark-fleet/hub}
+      SPARK_FLEET_LOG_LEVEL: ${SPARK_FLEET_LOG_LEVEL:-INFO}
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      - ${SPARK_FLEET_AGENT_DATA_DIR:-./agent-data}:/var/lib/spark-fleet-agent
+      - ${SPARK_FLEET_MODEL_CACHE_ROOT:-/srv/spark-fleet/hub}:/srv/spark-fleet/hub
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "python",
+          "-c",
+          "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8092/health', timeout=3)",
+        ]
+      interval: 20s
+      timeout: 5s
+      retries: 3
+      start_period: 15s

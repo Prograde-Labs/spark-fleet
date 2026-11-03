@@ -1,0 +1,16 @@
+.git
+.venv
+venv
+__pycache__
+*.py[cod]
+.pytest_cache
+.ruff_cache
+tests
+web/node_modules
+web/dist
+data
+*.sqlite
+*.sqlite-wal
+*.sqlite-shm
+.env
+.env.local
