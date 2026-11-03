@@ -308,6 +308,7 @@ def cache_disk_usage(
     roots: Sequence[Path],
     *,
     stat: Callable[[Path], os.stat_result] = os.stat,
+    is_symlink: Callable[[Path], bool] = Path.is_symlink,
 ) -> tuple[int, str | None]:
     """Sum inode-deduplicated cache bytes and report unreadable subtrees."""
 
@@ -339,7 +340,7 @@ def cache_disk_usage(
             for filename in filenames:
                 path = Path(dirpath) / filename
                 try:
-                    if path.is_symlink():
+                    if is_symlink(path):
                         continue
                     info = stat(path)
                 except OSError as exc:

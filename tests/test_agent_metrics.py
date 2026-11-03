@@ -1,7 +1,6 @@
 """Tests for agent metrics sampling, GPU parsing, and the snapshot endpoint."""
 
 import os
-import shutil
 import stat
 import subprocess
 from pathlib import Path
@@ -680,7 +679,8 @@ def test_cache_disk_usage_records_directory_stat_error(tmp_path):
     real_stat = os.stat
 
     def fake_stat(path, *args, **kwargs):
-        if Path(path) == nested:
+        assert isinstance(path, Path)
+        if path == nested:
             raise OSError("dir stat failed")
         return real_stat(path, *args, **kwargs)
 
