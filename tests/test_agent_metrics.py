@@ -622,12 +622,28 @@ def test_cache_disk_usage_skips_symlinks(tmp_path):
     assert error is None
 
 
-def test_cache_disk_usage_dedupes_overlapping_roots(tmp_path):
+def test_cache_disk_usage_dedupes_nested_roots(tmp_path):
     root = tmp_path / "hub"
-    root.mkdir()
-    (root / "file").write_bytes(b"1234")
+    nested = root / "models"
+    nested.mkdir(parents=True)
+    (nested / "file").write_bytes(b"1234")
 
-    total, error = cache_disk_usage([root, root])
+    total, error = cache_disk_usage([root, nested])
+
+    assert total == 4
+    assert error is None
+
+
+def test_cache_disk_usage_dedupes_hardlinked_files(tmp_path):
+    first = tmp_path / "hub"
+    second = tmp_path / "scratch"
+    first.mkdir()
+    second.mkdir()
+    source = first / "file"
+    source.write_bytes(b"1234")
+    (second / "file").hardlink_to(source)
+
+    total, error = cache_disk_usage([first, second])
 
     assert total == 4
     assert error is None
@@ -793,6 +809,34 @@ def test_cache_filesystem_usage_reports_missing_root_beside_valid_root(tmp_path)
 
     assert (total, free) == (1000, 250)
     assert f"{missing}: not found" in error
+
+
+def test_cache_filesystem_usage_summarizes_many_errors(tmp_path):
+    roots = [tmp_path / f"root-{index}" for index in range(7)]
+
+    def fake_stat(path):
+        raise OSError(f"error {path.name}")
+
+    total, free, error = cache_filesystem_usage(roots, stat=fake_stat)
+
+    assert (total, free) == (None, None)
+    assert "error root-0" in error
+    assert "error root-4" in error
+    assert "error root-5" not in error
+    assert "... and 3 more" in error
+
+
+def test_cache_filesystem_usage_keeps_five_errors_without_suffix(tmp_path):
+    roots = [tmp_path / f"root-{index}" for index in range(4)]
+
+    def fake_stat(path):
+        raise OSError(f"error {path.name}")
+
+    total, free, error = cache_filesystem_usage(roots, stat=fake_stat)
+
+    assert (total, free) == (None, None)
+    assert "error root-3" in error
+    assert "more" not in error
 
 
 def test_cache_filesystem_usage_reports_stat_and_usage_errors(tmp_path):

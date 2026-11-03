@@ -272,19 +272,29 @@ def _error_text(exc: BaseException) -> str:
     return str(exc) or type(exc).__name__
 
 
-def _summarize_errors(
-    errors: Sequence[BaseException | str], *, limit: int = 5
-) -> str:
-    messages = [
-        _error_text(error) if isinstance(error, BaseException) else error
-        for error in errors
-    ]
-    if len(messages) <= limit:
-        return "; ".join(messages)
-    return (
-        "; ".join(messages[:limit])
-        + f"; ... and {len(messages) - limit} more"
-    )
+class _ErrorLog:
+    """Collect a bounded number of error messages plus an overflow count."""
+
+    def __init__(self, limit: int = 5):
+        self._limit = limit
+        self._messages: list[str] = []
+        self._extra = 0
+
+    def add(self, error: BaseException | str) -> None:
+        if len(self._messages) < self._limit:
+            self._messages.append(
+                _error_text(error) if isinstance(error, BaseException) else error
+            )
+        else:
+            self._extra += 1
+
+    def summary(self) -> str | None:
+        if not self._messages:
+            return None
+        text = "; ".join(self._messages)
+        if self._extra:
+            text += f"; ... and {self._extra} more"
+        return text
 
 
 def cache_disk_usage(roots: Sequence[Path]) -> tuple[int, str | None]:
@@ -292,11 +302,11 @@ def cache_disk_usage(roots: Sequence[Path]) -> tuple[int, str | None]:
 
     seen: set[tuple[int, int]] = set()
     total = 0
-    errors: list[BaseException] = []
+    errors = _ErrorLog()
     for root in roots:
         if not root.is_dir():
             continue
-        for dirpath, _dirnames, filenames in os.walk(root, onerror=errors.append):
+        for dirpath, _dirnames, filenames in os.walk(root, onerror=errors.add):
             for filename in filenames:
                 path = Path(dirpath) / filename
                 try:
@@ -304,16 +314,14 @@ def cache_disk_usage(roots: Sequence[Path]) -> tuple[int, str | None]:
                         continue
                     info = path.stat()
                 except OSError as exc:
-                    errors.append(exc)
+                    errors.add(exc)
                     continue
                 inode = (info.st_dev, info.st_ino)
                 if inode in seen:
                     continue
                 seen.add(inode)
                 total += info.st_size
-    if errors:
-        return total, _summarize_errors(errors)
-    return total, None
+    return total, errors.summary()
 
 
 def cache_filesystem_usage(
@@ -328,41 +336,40 @@ def cache_filesystem_usage(
     resolved = 0
     total = 0
     free = 0
-    errors: list[str] = []
+    errors = _ErrorLog()
     for root in roots:
         try:
             info = stat(root)
         except FileNotFoundError:
-            errors.append(f"{root}: not found")
+            errors.add(f"{root}: not found")
             continue
         except OSError as exc:
-            errors.append(f"{root}: {_error_text(exc)}")
+            errors.add(f"{root}: {_error_text(exc)}")
             continue
         if not S_ISDIR(info.st_mode):
-            errors.append(f"{root}: not a directory")
+            errors.add(f"{root}: not a directory")
             continue
         if info.st_dev in seen:
             continue
         try:
             usage = disk_usage(root)
         except OSError as exc:
-            errors.append(f"{root}: {_error_text(exc)}")
+            errors.add(f"{root}: {_error_text(exc)}")
             continue
         seen.add(info.st_dev)
         resolved += 1
         total += usage.total
         free += usage.free
     if not roots:
-        errors.append("no cache roots configured")
+        errors.add("no cache roots configured")
     elif resolved == 0:
-        errors.append(
+        errors.add(
             "no usable cache root: " + ", ".join(str(root) for root in roots)
         )
+    summary = errors.summary()
     if resolved == 0:
-        return None, None, _summarize_errors(errors)
-    if errors:
-        return total, free, _summarize_errors(errors)
-    return total, free, None
+        return None, None, summary
+    return total, free, summary
 
 
 def collect_metrics(
