@@ -56,14 +56,10 @@ export function cacheDetail(aggregate) {
     caption,
     showCapacity:
       caption === 'complete' ||
-      (caption === 'partial' && aggregate.capacityReported > 0),
+      (caption === 'partial' &&
+        aggregate.capacityReported > 0 &&
+        aggregate.reported === aggregate.usedWithCapacity),
   }
-}
-
-export function cacheStatus(metrics) {
-  if (cacheKnown(metrics)) return 'filesystem'
-  if (cacheCapacityKnown(metrics)) return 'free-missing'
-  return 'capacity-missing'
 }
 
 export function cacheBarKnown(metrics) {
@@ -114,10 +110,6 @@ export function groupGpus(metrics) {
 export function cacheAggregate(metricsByNode) {
   const entries = Object.values(metricsByNode || {}).filter(Boolean)
   const counted = entries.filter((metrics) => !metrics.fetchFailed)
-  const hasCacheFields = (metrics) =>
-    reported(metrics.cache_bytes) ||
-    reported(metrics.cache_total_bytes) ||
-    reported(metrics.cache_free_bytes)
   const paired = counted.filter(
     (metrics) =>
       reported(metrics.cache_total_bytes) &&
@@ -128,6 +120,12 @@ export function cacheAggregate(metricsByNode) {
   ).length
   const reportedNodes = counted.filter((metrics) =>
     reported(metrics.cache_bytes),
+  ).length
+  const usedWithCapacity = counted.filter(
+    (metrics) =>
+      reported(metrics.cache_bytes) &&
+      reported(metrics.cache_total_bytes) &&
+      reported(metrics.cache_free_bytes),
   ).length
   const used = counted.reduce(
     (sum, metrics) =>
@@ -146,7 +144,6 @@ export function cacheAggregate(metricsByNode) {
     reportedNodes > 0 &&
     entries.every((metrics) => {
       if (metrics.fetchFailed) return false
-      if (!hasCacheFields(metrics)) return true
       return (
         reported(metrics.cache_bytes) &&
         reported(metrics.cache_total_bytes) &&
@@ -161,5 +158,6 @@ export function cacheAggregate(metricsByNode) {
     complete,
     reported: reportedNodes,
     capacityReported: capacityNodes,
+    usedWithCapacity,
   }
 }

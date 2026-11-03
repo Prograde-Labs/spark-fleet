@@ -11,7 +11,6 @@ import {
   cacheHeadline,
   cacheKnown,
   cachePercent,
-  cacheStatus,
   collectNodeMetrics,
   gpuMemoryKnown,
   gpuResident,
@@ -71,16 +70,6 @@ test('cachePercent scales cache bytes to filesystem capacity', () => {
   assert.equal(cachePercent({ cache_bytes: 250 }), 0)
 })
 
-test('cacheStatus distinguishes filesystem, free-missing, and capacity-missing', () => {
-  assert.equal(
-    cacheStatus({ cache_total_bytes: 1000, cache_free_bytes: 250 }),
-    'filesystem',
-  )
-  assert.equal(cacheStatus({ cache_total_bytes: 1000 }), 'free-missing')
-  assert.equal(cacheStatus({ cache_bytes: 10 }), 'capacity-missing')
-  assert.equal(cacheStatus({}), 'capacity-missing')
-})
-
 test('telemetryState distinguishes ok, unavailable, and disabled', () => {
   assert.equal(telemetryState({ host_total_bytes: 1 }, true), 'ok')
   assert.equal(telemetryState({}, true), 'unavailable')
@@ -103,10 +92,11 @@ test('cacheAggregate includes capacity from a node without cache bytes', () => {
     complete: false,
     reported: 1,
     capacityReported: 2,
+    usedWithCapacity: 1,
   })
 })
 
-test('cacheAggregate ignores a node with no cache telemetry', () => {
+test('cacheAggregate is incomplete for a node with no cache telemetry', () => {
   const aggregate = cacheAggregate({
     a: { cache_bytes: 10, cache_total_bytes: 1000, cache_free_bytes: 250 },
     b: { host_total_bytes: 8000 },
@@ -116,10 +106,20 @@ test('cacheAggregate ignores a node with no cache telemetry', () => {
     used: 10,
     capacity: 1000,
     free: 250,
-    complete: true,
+    complete: false,
     reported: 1,
     capacityReported: 1,
+    usedWithCapacity: 1,
   })
+})
+
+test('cacheAggregate is incomplete for an empty node entry', () => {
+  const aggregate = cacheAggregate({
+    a: { cache_bytes: 10, cache_total_bytes: 1000, cache_free_bytes: 250 },
+    b: {},
+  })
+
+  assert.equal(aggregate.complete, false)
 })
 
 test('cacheAggregate is incomplete when a node fetch failed', () => {
@@ -135,6 +135,7 @@ test('cacheAggregate is incomplete when a node fetch failed', () => {
     complete: false,
     reported: 1,
     capacityReported: 1,
+    usedWithCapacity: 1,
   })
 })
 
@@ -169,6 +170,7 @@ test('cacheAggregate includes a zero-byte contributor with capacity', () => {
     complete: true,
     reported: 2,
     capacityReported: 2,
+    usedWithCapacity: 2,
   })
 })
 
@@ -185,6 +187,7 @@ test('cacheAggregate sums multiple complete contributors', () => {
     complete: true,
     reported: 2,
     capacityReported: 2,
+    usedWithCapacity: 2,
   })
 })
 
@@ -198,6 +201,7 @@ test('cacheAggregate treats a zero-byte contributor without capacity as incomple
   assert.equal(aggregate.used, 10)
   assert.equal(aggregate.reported, 2)
   assert.equal(aggregate.capacityReported, 1)
+  assert.equal(aggregate.usedWithCapacity, 1)
   assert.equal(aggregate.capacity, 1000)
   assert.equal(aggregate.free, 250)
 })
@@ -210,6 +214,7 @@ test('cacheAggregate is incomplete when a contributor lacks capacity', () => {
 
   assert.equal(aggregate.complete, false)
   assert.equal(aggregate.capacityReported, 1)
+  assert.equal(aggregate.usedWithCapacity, 1)
 })
 
 test('cacheAggregate is incomplete when a contributor lacks free space', () => {
@@ -222,6 +227,7 @@ test('cacheAggregate is incomplete when a contributor lacks free space', () => {
   assert.equal(aggregate.capacity, 1000)
   assert.equal(aggregate.free, 250)
   assert.equal(aggregate.capacityReported, 1)
+  assert.equal(aggregate.usedWithCapacity, 1)
 })
 
 test('cacheAggregate is incomplete with zero capacity', () => {
@@ -234,6 +240,7 @@ test('cacheAggregate is incomplete with zero capacity', () => {
   assert.equal(aggregate.capacity, 1000)
   assert.equal(aggregate.free, 250)
   assert.equal(aggregate.capacityReported, 1)
+  assert.equal(aggregate.usedWithCapacity, 2)
 })
 
 test('cacheAggregate with no nodes is empty and incomplete', () => {
@@ -244,6 +251,7 @@ test('cacheAggregate with no nodes is empty and incomplete', () => {
     complete: false,
     reported: 0,
     capacityReported: 0,
+    usedWithCapacity: 0,
   })
 })
 
@@ -255,6 +263,7 @@ test('cacheAggregate without an argument is empty and incomplete', () => {
     complete: false,
     reported: 0,
     capacityReported: 0,
+    usedWithCapacity: 0,
   })
 })
 
@@ -271,6 +280,7 @@ test('cacheAggregate ignores null node entries', () => {
     complete: true,
     reported: 1,
     capacityReported: 1,
+    usedWithCapacity: 1,
   })
 })
 
@@ -287,6 +297,7 @@ test('cacheAggregate ignores a free-only node without capacity', () => {
     complete: false,
     reported: 1,
     capacityReported: 1,
+    usedWithCapacity: 1,
   })
 })
 
@@ -330,7 +341,7 @@ test('cacheCaption distinguishes complete, partial, and unavailable', () => {
   )
 })
 
-test('cacheDetail shows capacity only for complete or paired partial totals', () => {
+test('cacheDetail shows capacity only when every used reporter has capacity', () => {
   assert.deepEqual(
     cacheDetail(
       cacheAggregate({ a: { cache_bytes: 10, cache_total_bytes: 1000, cache_free_bytes: 250 } }),
@@ -348,6 +359,15 @@ test('cacheDetail shows capacity only for complete or paired partial totals', ()
       cacheAggregate({ a: { cache_total_bytes: 1000, cache_free_bytes: 250 } }),
     ),
     { caption: 'partial', showCapacity: true },
+  )
+  assert.deepEqual(
+    cacheDetail(
+      cacheAggregate({
+        a: { cache_bytes: 10, cache_total_bytes: 1000, cache_free_bytes: 250 },
+        b: { cache_bytes: 5 },
+      }),
+    ),
+    { caption: 'partial', showCapacity: false },
   )
   assert.deepEqual(cacheDetail(cacheAggregate({})), {
     caption: 'unavailable',

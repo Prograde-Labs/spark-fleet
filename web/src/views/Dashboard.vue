@@ -261,7 +261,7 @@ onBeforeUnmount(() => {
       <button class="btn ml-auto" :disabled="refreshing" @click="load">Retry</button>
     </div>
     <div
-      v-else-if="notice"
+      v-if="notice"
       class="flex items-center gap-3 rounded-lg border border-cyan/30 bg-cyan/[0.06] px-4 py-3"
     >
       <Radio class="h-4 w-4 text-cyan" />

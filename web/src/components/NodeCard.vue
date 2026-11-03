@@ -16,7 +16,6 @@ import {
   cacheBarKnown,
   cacheKnown as metricsCacheKnown,
   cachePercent,
-  cacheStatus,
   gpuMemoryKnown,
   gpuResident,
   groupGpus,
@@ -47,7 +46,6 @@ const ringOffset = computed(
 const cacheTotal = computed(() => props.metrics.cache_total_bytes)
 const cacheFree = computed(() => props.metrics.cache_free_bytes)
 const cacheKnown = computed(() => metricsCacheKnown(props.metrics))
-const cacheState = computed(() => cacheStatus(props.metrics))
 const cacheBar = computed(() => cacheBarKnown(props.metrics))
 const telemetry = computed(() => telemetryState(props.metrics, props.node.enabled))
 const cacheBarPercent = computed(() => cachePercent(props.metrics))
@@ -180,7 +178,6 @@ const gpuPercent = (gpu, key) => {
             <template v-if="cacheKnown">
               Filesystem {{ formatBytes(cacheFree) }} free of {{ formatBytes(cacheTotal) }}
             </template>
-            <template v-else-if="cacheState === 'free-missing'">Free space unavailable</template>
             <template v-else>Capacity unavailable</template>
           </p>
           <p class="mt-0.5 font-mono text-[9px] text-faint">
