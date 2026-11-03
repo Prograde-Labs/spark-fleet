@@ -213,6 +213,18 @@ def test_record_node_snapshot_skips_missing_and_invalid_values(store):
     assert store.latest_node_metrics("spark-01") == {CACHE_BYTES: 10.0}
 
 
+def test_record_node_snapshot_requires_both_capacity_values(store):
+    store.record_node_snapshot(
+        "spark-01",
+        {CACHE_BYTES: 10, CACHE_TOTAL: 1000},
+        ts=1234.0,
+    )
+
+    latest = store.latest_node_metrics("spark-01")
+
+    assert latest == {CACHE_BYTES: 10.0}
+
+
 def test_record_node_snapshot_requires_node_id(store):
     with pytest.raises(ValueError, match="node id"):
         store.record_node_snapshot("", SNAPSHOT)

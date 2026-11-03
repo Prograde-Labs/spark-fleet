@@ -1,6 +1,7 @@
 """Tests for agent metrics sampling, GPU parsing, and the snapshot endpoint."""
 
 import os
+import shutil
 import stat
 import subprocess
 from pathlib import Path
@@ -556,6 +557,7 @@ def test_collect_metrics_records_cache_error(tmp_path):
 
     assert snapshot.cache_bytes is None
     assert "permission denied" in snapshot.errors["cache"]
+    assert "cache bytes unavailable" not in snapshot.errors["cache"]
 
 
 def test_collect_metrics_uses_default_cache_sampler(tmp_path):
@@ -917,10 +919,11 @@ def test_cache_filesystem_usage_caps_root_prefix(tmp_path):
 
 
 def test_cache_filesystem_usage_uses_default_disk_usage(tmp_path):
+    usage = shutil.disk_usage(tmp_path)
     total, free, error = cache_filesystem_usage([tmp_path])
 
     assert error is None
-    assert total > 0
+    assert total == usage.total
     assert 0 <= free <= total
 
 
@@ -1171,6 +1174,22 @@ def test_collect_metrics_nulls_half_known_capacity(tmp_path):
     assert snapshot.cache_total_bytes is None
     assert snapshot.cache_free_bytes is None
     assert "cache capacity unknown" in snapshot.errors["cache"]
+
+
+def test_collect_metrics_nulls_half_known_capacity_beside_partial_error(tmp_path):
+    snapshot = collect_metrics(
+        [tmp_path / "hub"],
+        meminfo_path=write_meminfo(tmp_path),
+        container_sampler=lambda: [],
+        cache_sampler=lambda: 500,
+        cache_usage_sampler=lambda: (1000, None, "one root failed"),
+        gpu_sampler=lambda: ((), None),
+    )
+
+    assert snapshot.cache_total_bytes is None
+    assert snapshot.cache_free_bytes is None
+    assert "cache capacity unknown" in snapshot.errors["cache"]
+    assert "one root failed" in snapshot.errors["cache"]
 
 
 def test_collect_metrics_reports_bytes_and_capacity_errors_together(tmp_path):

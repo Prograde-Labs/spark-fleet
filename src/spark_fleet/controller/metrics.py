@@ -65,8 +65,13 @@ class MetricsStore:
             raise ValueError("node id must not be empty")
         ts = time.time() if ts is None else ts
         rows: list[tuple[str, str, float, float]] = []
+        cache_total = snapshot.get(CACHE_TOTAL)
+        cache_free = snapshot.get(CACHE_FREE)
+        capacity_ok = _is_number(cache_total) and _is_number(cache_free)
         for metric in BASE_METRICS:
             value = snapshot.get(metric)
+            if metric in (CACHE_TOTAL, CACHE_FREE) and not capacity_ok:
+                continue
             if _is_number(value):
                 rows.append((node_id, metric, float(value), ts))
         gpus = snapshot.get("gpus")

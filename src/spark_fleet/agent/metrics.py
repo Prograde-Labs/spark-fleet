@@ -462,8 +462,9 @@ def collect_metrics(
     if cache_bytes is None and not bytes_failed:
         cache_errors.append("cache bytes unavailable")
     if cache_total_bytes is None or cache_free_bytes is None:
+        half_known = cache_total_bytes is not None or cache_free_bytes is not None
         cache_total_bytes, cache_free_bytes = None, None
-        if not usage_error:
+        if half_known or not usage_error:
             cache_errors.append("cache capacity unknown")
     if cache_errors:
         errors["cache"] = "; ".join(cache_errors)
