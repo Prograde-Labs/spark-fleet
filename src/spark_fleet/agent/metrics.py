@@ -14,11 +14,13 @@ from __future__ import annotations
 import csv
 import os
 import re
+import shutil
 import subprocess
 import time
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, replace
 from pathlib import Path
+from stat import S_ISDIR
 from typing import Any
 
 from spark_fleet.agent import containers
@@ -68,6 +70,8 @@ class MetricsSnapshot:
     containers: tuple[ContainerInfo, ...]
     container_memory_bytes: int
     cache_bytes: int
+    cache_total_bytes: int
+    cache_free_bytes: int
     gpus: tuple[GpuInfo, ...]
     errors: Mapping[str, str]
 
@@ -293,12 +297,54 @@ def cache_disk_usage(roots: Sequence[Path]) -> tuple[int, str | None]:
     return total, None
 
 
+def cache_filesystem_usage(
+    roots: Sequence[Path],
+    *,
+    stat: Callable[[Path], os.stat_result] = os.stat,
+    disk_usage: Callable[[Path], Any] = shutil.disk_usage,
+) -> tuple[int, int, str | None]:
+    """Return deduplicated filesystem capacity and free bytes for cache roots."""
+
+    seen: set[int] = set()
+    resolved = 0
+    total = 0
+    free = 0
+    errors: list[str] = []
+    for root in roots:
+        try:
+            info = stat(root)
+        except FileNotFoundError:
+            continue
+        except OSError as exc:
+            errors.append(f"{root}: {exc}")
+            continue
+        if not S_ISDIR(info.st_mode) or info.st_dev in seen:
+            continue
+        try:
+            usage = disk_usage(root)
+        except OSError as exc:
+            errors.append(f"{root}: {exc}")
+            continue
+        seen.add(info.st_dev)
+        resolved += 1
+        total += usage.total
+        free += usage.free
+    if roots and resolved == 0:
+        errors.append(
+            "no usable cache root: " + ", ".join(str(root) for root in roots)
+        )
+    if errors:
+        return total, free, "; ".join(errors)
+    return total, free, None
+
+
 def collect_metrics(
     cache_roots: Sequence[Path],
     *,
     meminfo_path: Path = MEMINFO_PATH,
     container_sampler: Callable[[], Sequence[ContainerInfo]] | None = None,
     cache_sampler: Callable[[], int] | None = None,
+    cache_usage_sampler: Callable[[], tuple[int, int, str | None]] | None = None,
     gpu_sampler: Callable[[], tuple[tuple[GpuInfo, ...], str | None]] | None = None,
     clock: Callable[[], float] = time.time,
 ) -> MetricsSnapshot:
@@ -306,6 +352,7 @@ def collect_metrics(
 
     host = read_host_memory(meminfo_path)
     errors: dict[str, str] = {}
+    cache_errors: list[str] = []
 
     try:
         container_list = tuple(
@@ -323,11 +370,26 @@ def collect_metrics(
             cache_bytes = cache_sampler()
         except Exception as exc:
             cache_bytes = 0
-            errors["cache"] = str(exc)
+            cache_errors.append(str(exc))
     else:
         cache_bytes, cache_error = cache_disk_usage(cache_roots)
         if cache_error is not None:
-            errors["cache"] = cache_error
+            cache_errors.append(cache_error)
+
+    if cache_usage_sampler is not None:
+        try:
+            cache_total_bytes, cache_free_bytes, usage_error = cache_usage_sampler()
+        except Exception as exc:
+            cache_total_bytes, cache_free_bytes = 0, 0
+            usage_error = str(exc)
+    else:
+        cache_total_bytes, cache_free_bytes, usage_error = cache_filesystem_usage(
+            cache_roots
+        )
+    if usage_error is not None:
+        cache_errors.append(usage_error)
+    if cache_errors:
+        errors["cache"] = "; ".join(cache_errors)
 
     if gpu_sampler is not None:
         gpus, gpu_error = gpu_sampler()
@@ -343,6 +405,8 @@ def collect_metrics(
         containers=container_list,
         container_memory_bytes=container_memory_bytes,
         cache_bytes=cache_bytes,
+        cache_total_bytes=cache_total_bytes,
+        cache_free_bytes=cache_free_bytes,
         gpus=gpus,
         errors=errors,
     )
@@ -357,6 +421,8 @@ def snapshot_to_dict(snapshot: MetricsSnapshot) -> dict[str, Any]:
         "host_available_bytes": snapshot.host_available_bytes,
         "container_memory_bytes": snapshot.container_memory_bytes,
         "cache_bytes": snapshot.cache_bytes,
+        "cache_total_bytes": snapshot.cache_total_bytes,
+        "cache_free_bytes": snapshot.cache_free_bytes,
         "containers": [
             {
                 "id": info.id,

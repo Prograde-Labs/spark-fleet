@@ -1,10 +1,11 @@
 """Controller metrics store: ingest agent snapshots and gateway counters.
 
 Agent snapshots are flattened into ``node_metrics`` series (host memory,
-container memory, cache usage, and per-GPU values). Gateway counters are written
-as ``inference_samples`` per deployment. The store exposes latest values, bounded
-range queries, aggregate inference totals, retention pruning, and incremental
-vacuum for periodic maintenance.
+container memory, cache usage and capacity, and per-GPU values). GPU residency is
+stored as ``0``/``1`` and omitted when the agent cannot determine it. Gateway
+counters are written as ``inference_samples`` per deployment. The store exposes
+latest values, bounded range queries, aggregate inference totals, retention
+pruning, and incremental vacuum for periodic maintenance.
 """
 
 from __future__ import annotations
@@ -20,12 +21,24 @@ HOST_TOTAL = "host_total_bytes"
 HOST_AVAILABLE = "host_available_bytes"
 CONTAINER_MEMORY = "container_memory_bytes"
 CACHE_BYTES = "cache_bytes"
-BASE_METRICS = (HOST_TOTAL, HOST_AVAILABLE, CONTAINER_MEMORY, CACHE_BYTES)
+CACHE_TOTAL = "cache_total_bytes"
+CACHE_FREE = "cache_free_bytes"
+BASE_METRICS = (
+    HOST_TOTAL,
+    HOST_AVAILABLE,
+    CONTAINER_MEMORY,
+    CACHE_BYTES,
+    CACHE_TOTAL,
+    CACHE_FREE,
+)
 GPU_FIELDS = (
     "memory_total_bytes",
     "memory_used_bytes",
     "utilization_percent",
     "temperature_celsius",
+    "compute_processes",
+    "compute_memory_bytes",
+    "resident",
 )
 
 
@@ -66,6 +79,8 @@ class MetricsStore:
                     continue
                 for field in GPU_FIELDS:
                     value = gpu.get(field)
+                    if field == "resident" and isinstance(value, bool):
+                        value = int(value)
                     if _is_number(value):
                         rows.append((node_id, f"gpu.{index}.{field}", float(value), ts))
         self._db.record_metrics(rows)

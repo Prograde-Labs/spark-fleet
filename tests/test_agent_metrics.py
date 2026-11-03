@@ -1,7 +1,10 @@
 """Tests for agent metrics sampling, GPU parsing, and the snapshot endpoint."""
 
+import shutil
+import stat
 import subprocess
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 from fastapi.testclient import TestClient
@@ -15,6 +18,7 @@ from spark_fleet.agent.metrics import (
     MetricsError,
     MetricsSnapshot,
     cache_disk_usage,
+    cache_filesystem_usage,
     collect_gpus,
     collect_metrics,
     parse_meminfo,
@@ -381,6 +385,8 @@ def test_collect_gpus_marks_uuidless_gpu_idle_when_compute_query_is_empty():
             containers=(),
             container_memory_bytes=0,
             cache_bytes=0,
+            cache_total_bytes=0,
+            cache_free_bytes=0,
             gpus=gpus,
             errors={},
         )
@@ -480,13 +486,15 @@ def test_collect_gpus_keeps_matched_counts_when_another_uuid_is_unattributable()
 
 
 def test_collect_metrics_sums_container_memory(tmp_path, monkeypatch):
+    root = tmp_path / "hub"
+    root.mkdir()
     monkeypatch.setattr(
         metrics.containers,
         "managed_containers",
         lambda: [container(memory_usage=100), container(memory_usage=None)],
     )
     snapshot = collect_metrics(
-        [tmp_path / "hub"],
+        [root],
         meminfo_path=write_meminfo(tmp_path),
         cache_sampler=lambda: 500,
         gpu_sampler=lambda: ((), None),
@@ -584,6 +592,197 @@ def test_cache_disk_usage_sums_and_reports_walk_errors(tmp_path, monkeypatch):
     assert "permission denied" in error
 
 
+def test_cache_filesystem_usage_dedupes_roots_on_one_device(tmp_path):
+    first = tmp_path / "hub"
+    second = tmp_path / "hub" / "models"
+    first.mkdir()
+    second.mkdir()
+    calls = []
+
+    def fake_stat(path):
+        return SimpleNamespace(st_dev=7, st_mode=stat.S_IFDIR)
+
+    def fake_usage(path):
+        calls.append(path)
+        return SimpleNamespace(total=1000, free=250)
+
+    total, free, error = cache_filesystem_usage(
+        [first, second], stat=fake_stat, disk_usage=fake_usage
+    )
+
+    assert (total, free, error) == (1000, 250, None)
+    assert calls == [first]
+
+
+def test_cache_filesystem_usage_sums_distinct_devices(tmp_path):
+    first = tmp_path / "hub"
+    second = tmp_path / "scratch"
+    first.mkdir()
+    second.mkdir()
+    devices = {first: 1, second: 2}
+    usages = {
+        first: SimpleNamespace(total=1000, free=250),
+        second: SimpleNamespace(total=2000, free=500),
+    }
+
+    total, free, error = cache_filesystem_usage(
+        [first, second],
+        stat=lambda path: SimpleNamespace(
+            st_dev=devices[path], st_mode=stat.S_IFDIR
+        ),
+        disk_usage=lambda path: usages[path],
+    )
+
+    assert (total, free, error) == (3000, 750, None)
+
+
+def test_cache_filesystem_usage_dedupes_real_roots(tmp_path):
+    first = tmp_path / "hub"
+    second = tmp_path / "hub" / "models"
+    first.mkdir()
+    second.mkdir()
+
+    total, free, error = cache_filesystem_usage([first, second])
+
+    assert total == shutil.disk_usage(first).total
+    assert free >= 0
+    assert error is None
+
+
+def test_cache_filesystem_usage_reports_when_no_root_resolves(tmp_path):
+    missing = tmp_path / "missing"
+    file_root = tmp_path / "file"
+    file_root.write_bytes(b"x")
+
+    total, free, error = cache_filesystem_usage([missing, file_root])
+
+    assert (total, free) == (0, 0)
+    assert "no usable cache root" in error
+    assert str(missing) in error
+    assert str(file_root) in error
+
+
+def test_cache_filesystem_usage_allows_missing_root_beside_valid_root(tmp_path):
+    root = tmp_path / "hub"
+    root.mkdir()
+
+    total, free, error = cache_filesystem_usage([tmp_path / "missing", root])
+
+    assert total == shutil.disk_usage(root).total
+    assert free >= 0
+    assert error is None
+
+
+def test_cache_filesystem_usage_reports_stat_and_usage_errors(tmp_path):
+    stat_fails = tmp_path / "stat-fails"
+    usage_fails = tmp_path / "usage-fails"
+    stat_fails.mkdir()
+    usage_fails.mkdir()
+
+    def fake_stat(path):
+        if path == stat_fails:
+            raise OSError("stat denied")
+        return SimpleNamespace(st_dev=3, st_mode=stat.S_IFDIR)
+
+    def fake_usage(path):
+        if path == usage_fails:
+            raise OSError("usage denied")
+        return SimpleNamespace(total=1000, free=250)
+
+    total, free, error = cache_filesystem_usage(
+        [stat_fails, usage_fails],
+        stat=fake_stat,
+        disk_usage=fake_usage,
+    )
+
+    assert (total, free) == (0, 0)
+    assert "stat denied" in error
+    assert "usage denied" in error
+
+
+def test_collect_metrics_includes_cache_filesystem_capacity(tmp_path):
+    root = tmp_path / "hub"
+    root.mkdir()
+
+    snapshot = collect_metrics(
+        [root],
+        meminfo_path=write_meminfo(tmp_path),
+        container_sampler=lambda: [],
+        cache_sampler=lambda: 500,
+        cache_usage_sampler=lambda: (1000, 250, None),
+        gpu_sampler=lambda: ((), None),
+    )
+
+    assert snapshot.cache_bytes == 500
+    assert snapshot.cache_total_bytes == 1000
+    assert snapshot.cache_free_bytes == 250
+
+
+def test_collect_metrics_uses_default_cache_usage_sampler(tmp_path, monkeypatch):
+    monkeypatch.setattr(
+        metrics, "cache_filesystem_usage", lambda roots: (1000, 250, None)
+    )
+
+    snapshot = collect_metrics(
+        [tmp_path / "hub"],
+        meminfo_path=write_meminfo(tmp_path),
+        container_sampler=lambda: [],
+        cache_sampler=lambda: 500,
+        gpu_sampler=lambda: ((), None),
+    )
+
+    assert snapshot.cache_total_bytes == 1000
+    assert snapshot.cache_free_bytes == 250
+
+
+def test_collect_metrics_records_cache_capacity_error(tmp_path):
+    snapshot = collect_metrics(
+        [tmp_path / "hub"],
+        meminfo_path=write_meminfo(tmp_path),
+        container_sampler=lambda: [],
+        cache_sampler=lambda: 500,
+        cache_usage_sampler=lambda: (0, 0, "disk usage failed"),
+        gpu_sampler=lambda: ((), None),
+    )
+
+    assert "disk usage failed" in snapshot.errors["cache"]
+
+
+def test_collect_metrics_records_cache_usage_sampler_exception(tmp_path):
+    def fail():
+        raise OSError("statvfs failed")
+
+    snapshot = collect_metrics(
+        [tmp_path / "hub"],
+        meminfo_path=write_meminfo(tmp_path),
+        container_sampler=lambda: [],
+        cache_sampler=lambda: 500,
+        cache_usage_sampler=fail,
+        gpu_sampler=lambda: ((), None),
+    )
+
+    assert snapshot.cache_total_bytes == 0
+    assert snapshot.cache_free_bytes == 0
+    assert "statvfs failed" in snapshot.errors["cache"]
+
+
+def test_collect_metrics_aggregates_cache_errors_from_both_sources(tmp_path):
+    def fail_bytes():
+        raise OSError("walk failed")
+
+    snapshot = collect_metrics(
+        [tmp_path / "hub"],
+        meminfo_path=write_meminfo(tmp_path),
+        container_sampler=lambda: [],
+        cache_sampler=fail_bytes,
+        cache_usage_sampler=lambda: (0, 0, "statvfs failed"),
+        gpu_sampler=lambda: ((), None),
+    )
+
+    assert "walk failed" in snapshot.errors["cache"]
+    assert "statvfs failed" in snapshot.errors["cache"]
+
+
 def test_collect_metrics_records_default_cache_error(tmp_path, monkeypatch):
     monkeypatch.setattr(metrics, "cache_disk_usage", lambda roots: (100, "permission denied"))
 
@@ -655,6 +854,8 @@ def test_snapshot_to_dict_shape():
         containers=(container(),),
         container_memory_bytes=100,
         cache_bytes=200,
+        cache_total_bytes=10_000,
+        cache_free_bytes=4_000,
         gpus=(
             GpuInfo(
                 index=0,
@@ -689,6 +890,8 @@ def test_snapshot_to_dict_shape():
     assert body["host_available_bytes"] == 500
     assert body["container_memory_bytes"] == 100
     assert body["cache_bytes"] == 200
+    assert body["cache_total_bytes"] == 10_000
+    assert body["cache_free_bytes"] == 4_000
     assert body["containers"] == [
         {
             "id": "abc123",
@@ -742,6 +945,8 @@ def test_snapshot_to_dict_reports_unknown_residency_when_compute_is_unavailable(
         containers=(),
         container_memory_bytes=0,
         cache_bytes=0,
+        cache_total_bytes=0,
+        cache_free_bytes=0,
         gpus=(
             GpuInfo(
                 index=0,
@@ -784,6 +989,8 @@ def test_metrics_endpoint_returns_snapshot(tmp_path, monkeypatch):
         containers=(),
         container_memory_bytes=0,
         cache_bytes=200,
+        cache_total_bytes=10_000,
+        cache_free_bytes=4_000,
         gpus=(),
         errors={},
     )
@@ -801,6 +1008,8 @@ def test_metrics_endpoint_returns_snapshot(tmp_path, monkeypatch):
     body = response.json()
     assert body["sampled_at"] == 1234.5
     assert body["cache_bytes"] == 200
+    assert body["cache_total_bytes"] == 10_000
+    assert body["cache_free_bytes"] == 4_000
 
 
 def test_metrics_endpoint_reports_host_error(tmp_path, monkeypatch):

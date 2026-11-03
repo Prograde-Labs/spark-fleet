@@ -4,6 +4,8 @@ import pytest
 
 from spark_fleet.controller.metrics import (
     CACHE_BYTES,
+    CACHE_FREE,
+    CACHE_TOTAL,
     CONTAINER_MEMORY,
     HOST_AVAILABLE,
     HOST_TOTAL,
@@ -18,6 +20,8 @@ SNAPSHOT = {
     "host_available_bytes": 65_536_000 * 1024,
     "container_memory_bytes": 1024,
     "cache_bytes": 2048,
+    "cache_total_bytes": 10_000,
+    "cache_free_bytes": 4_000,
     "containers": [],
     "gpus": [
         {
@@ -27,6 +31,10 @@ SNAPSHOT = {
             "memory_used_bytes": 500,
             "utilization_percent": 5,
             "temperature_celsius": 40,
+            "uuid": "GPU-aaa",
+            "compute_processes": 2,
+            "compute_memory_bytes": 768,
+            "resident": True,
         },
         {
             "index": 1,
@@ -35,6 +43,10 @@ SNAPSHOT = {
             "memory_used_bytes": None,
             "utilization_percent": None,
             "temperature_celsius": None,
+            "uuid": "GPU-bbb",
+            "compute_processes": None,
+            "compute_memory_bytes": None,
+            "resident": None,
         },
     ],
     "errors": {},
@@ -67,12 +79,59 @@ def test_record_node_snapshot_writes_base_and_gpu_series(store):
         HOST_AVAILABLE: float(65_536_000 * 1024),
         CONTAINER_MEMORY: 1024.0,
         CACHE_BYTES: 2048.0,
+        CACHE_TOTAL: 10_000.0,
+        CACHE_FREE: 4_000.0,
         "gpu.0.memory_total_bytes": 1000.0,
         "gpu.0.memory_used_bytes": 500.0,
         "gpu.0.utilization_percent": 5.0,
         "gpu.0.temperature_celsius": 40.0,
+        "gpu.0.compute_processes": 2.0,
+        "gpu.0.compute_memory_bytes": 768.0,
+        "gpu.0.resident": 1.0,
         "gpu.1.memory_total_bytes": 1000.0,
     }
+
+
+def test_record_node_snapshot_coerces_gpu_residency_boolean(store):
+    store.record_node_snapshot(
+        "spark-01",
+        {
+            "gpus": [
+                {
+                    "index": 0,
+                    "compute_processes": 1,
+                    "compute_memory_bytes": 512,
+                    "resident": True,
+                },
+                {
+                    "index": 1,
+                    "compute_processes": 0,
+                    "compute_memory_bytes": 0,
+                    "resident": False,
+                },
+                {
+                    "index": 2,
+                    "compute_processes": None,
+                    "compute_memory_bytes": None,
+                    "resident": None,
+                },
+                {"index": 3, "compute_processes": 1, "resident": "yes"},
+            ]
+        },
+        ts=1234.0,
+    )
+
+    latest = store.latest_node_metrics("spark-01")
+
+    assert latest["gpu.0.resident"] == 1.0
+    assert latest["gpu.1.resident"] == 0.0
+    assert latest["gpu.0.compute_processes"] == 1.0
+    assert latest["gpu.0.compute_memory_bytes"] == 512.0
+    assert "gpu.2.resident" not in latest
+    assert "gpu.2.compute_processes" not in latest
+    assert "gpu.2.compute_memory_bytes" not in latest
+    assert "gpu.3.resident" not in latest
+    assert latest["gpu.3.compute_processes"] == 1.0
 
 
 def test_record_node_snapshot_skips_missing_and_invalid_values(store):
@@ -83,6 +142,8 @@ def test_record_node_snapshot_skips_missing_and_invalid_values(store):
             "host_available_bytes": "bad",
             "container_memory_bytes": True,
             "cache_bytes": 10,
+            "cache_total_bytes": "bad",
+            "cache_free_bytes": True,
             "gpus": [{"index": "zero", "memory_total_bytes": 1}],
         },
         ts=1234.0,
