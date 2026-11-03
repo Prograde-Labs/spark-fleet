@@ -168,8 +168,11 @@ def collect_gpus(
             errors.append(
                 "could not attribute compute processes: " + ", ".join(unmatched)
             )
-        else:
-            gpus = list(_apply_compute_apps(gpus, compute_counts))
+        gpus = list(
+            _apply_compute_apps(
+                gpus, compute_counts, all_attributed=not unmatched
+            )
+        )
     return tuple(gpus), "; ".join(errors) or None
 
 
@@ -231,18 +234,26 @@ def _collect_compute_apps(
 
 
 def _apply_compute_apps(
-    gpus: Sequence[GpuInfo], counts: Mapping[str, tuple[int, int | None]]
+    gpus: Sequence[GpuInfo],
+    counts: Mapping[str, tuple[int, int | None]],
+    *,
+    all_attributed: bool,
 ) -> tuple[GpuInfo, ...]:
     updated: list[GpuInfo] = []
     for gpu in gpus:
-        if gpu.uuid is None:
-            # Every compute row matched a known GPU (or none exist), so this
-            # device cannot be running a compute process.
-            updated.append(
-                replace(gpu, compute_processes=0, compute_memory_bytes=0)
-            )
+        if gpu.uuid is None or gpu.uuid not in counts:
+            if all_attributed:
+                # Every compute row matched a known GPU (or none exist), so this
+                # device cannot be running a compute process.
+                updated.append(
+                    replace(gpu, compute_processes=0, compute_memory_bytes=0)
+                )
+            else:
+                # Unattributable rows exist, so this device's residency is
+                # unknown rather than provably idle.
+                updated.append(gpu)
             continue
-        processes, memory_bytes = counts.get(gpu.uuid, (0, 0))
+        processes, memory_bytes = counts[gpu.uuid]
         updated.append(
             replace(
                 gpu,

@@ -456,6 +456,22 @@ def test_collect_gpus_reports_unattributable_compute_uuid():
     )
 
     assert [gpu.compute_processes for gpu in gpus] == [None, None]
+    assert [gpu.compute_memory_bytes for gpu in gpus] == [None, None]
+    assert "could not attribute compute processes" in error
+    assert "GPU-zzz" in error
+
+
+def test_collect_gpus_keeps_matched_counts_when_another_uuid_is_unattributable():
+    compute = "GPU-aaa, 111, python, 512\nGPU-zzz, 999, python, 4096\n"
+
+    gpus, error = collect_gpus(
+        runner=dispatch_runner(gpu_stdout=GPU_CSV, compute_stdout=compute)
+    )
+
+    assert gpus[0].compute_processes == 1
+    assert gpus[0].compute_memory_bytes == 512 * 1024 * 1024
+    assert gpus[1].compute_processes is None
+    assert gpus[1].compute_memory_bytes is None
     assert "could not attribute compute processes" in error
     assert "GPU-zzz" in error
 
