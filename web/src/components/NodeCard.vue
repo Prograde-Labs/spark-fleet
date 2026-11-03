@@ -17,6 +17,7 @@ import {
   cachePercent,
   gpuMemoryKnown,
   gpuResident,
+  groupGpus,
 } from '../metrics'
 
 const props = defineProps({
@@ -40,9 +41,14 @@ const memoryPercent = computed(() =>
 const ringOffset = computed(
   () => CIRCUMFERENCE * (1 - memoryPercent.value / 100),
 )
-const cacheTotal = computed(() => Number(props.metrics.cache_total_bytes || 0))
-const cacheFree = computed(() => Number(props.metrics.cache_free_bytes || 0))
-const cacheKnown = computed(() => cacheCapacityKnown(props.metrics))
+const cacheTotal = computed(() => props.metrics.cache_total_bytes)
+const cacheFree = computed(() => props.metrics.cache_free_bytes)
+const cacheKnown = computed(
+  () =>
+    cacheCapacityKnown(props.metrics) &&
+    cacheFree.value !== null &&
+    cacheFree.value !== undefined,
+)
 const cacheBarPercent = computed(() => cachePercent(props.metrics))
 const containerPercent = computed(() =>
   total.value > 0
@@ -50,17 +56,7 @@ const containerPercent = computed(() =>
     : 0,
 )
 
-const gpus = computed(() => {
-  const groups = new Map()
-  for (const [key, value] of Object.entries(props.metrics || {})) {
-    const match = /^gpu\.(\d+)\.(.+)$/.exec(key)
-    if (!match) continue
-    const index = Number(match[1])
-    if (!groups.has(index)) groups.set(index, { index })
-    groups.get(index)[match[2]] = value
-  }
-  return [...groups.values()].sort((a, b) => a.index - b.index)
-})
+const gpus = computed(() => groupGpus(props.metrics))
 
 const online = computed(() => {
   if (!props.node.enabled) return { label: 'Disabled', tone: '' }

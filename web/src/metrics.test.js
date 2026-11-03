@@ -7,6 +7,7 @@ import {
   cachePercent,
   gpuMemoryKnown,
   gpuResident,
+  groupGpus,
 } from './metrics.js'
 
 test('gpuResident is tri-state', () => {
@@ -137,4 +138,71 @@ test('cacheAggregate with no nodes is empty and incomplete', () => {
     free: 0,
     complete: false,
   })
+})
+
+test('cacheAggregate without an argument is empty and incomplete', () => {
+  assert.deepEqual(cacheAggregate(), {
+    used: 0,
+    capacity: 0,
+    free: 0,
+    complete: false,
+  })
+})
+
+test('cacheAggregate ignores null node entries', () => {
+  const aggregate = cacheAggregate({
+    a: { cache_bytes: 10, cache_total_bytes: 1000, cache_free_bytes: 250 },
+    b: null,
+  })
+
+  assert.deepEqual(aggregate, {
+    used: 10,
+    capacity: 1000,
+    free: 250,
+    complete: true,
+  })
+})
+
+test('cacheAggregate sums a free-only node without completing', () => {
+  const aggregate = cacheAggregate({
+    a: { cache_bytes: 10, cache_total_bytes: 1000, cache_free_bytes: 250 },
+    b: { cache_free_bytes: 500 },
+  })
+
+  assert.deepEqual(aggregate, {
+    used: 10,
+    capacity: 1000,
+    free: 750,
+    complete: false,
+  })
+})
+
+test('groupGpus sorts by index and groups fields', () => {
+  const gpus = groupGpus({
+    'gpu.1.utilization_percent': 20,
+    'gpu.1.memory_total_bytes': 2000,
+    'gpu.0.utilization_percent': 90,
+    'host_total_bytes': 1000,
+  })
+
+  assert.deepEqual(gpus, [
+    { index: 0, utilization_percent: 90 },
+    { index: 1, utilization_percent: 20, memory_total_bytes: 2000 },
+  ])
+})
+
+test('groupGpus ignores malformed keys', () => {
+  const gpus = groupGpus({
+    'gpu.0.utilization_percent': 90,
+    'gpu.abc.utilization_percent': 10,
+    'gpu.0': 5,
+    'gpu..temperature_celsius': 60,
+  })
+
+  assert.deepEqual(gpus, [{ index: 0, utilization_percent: 90 }])
+})
+
+test('groupGpus without metrics is empty', () => {
+  assert.deepEqual(groupGpus(), [])
+  assert.deepEqual(groupGpus({}), [])
 })

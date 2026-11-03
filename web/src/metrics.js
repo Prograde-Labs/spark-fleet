@@ -28,8 +28,20 @@ export function cachePercent(metrics) {
 
 const reported = (value) => value !== null && value !== undefined
 
+export function groupGpus(metrics) {
+  const groups = new Map()
+  for (const [key, value] of Object.entries(metrics || {})) {
+    const match = /^gpu\.(\d+)\.(.+)$/.exec(key)
+    if (!match) continue
+    const index = Number(match[1])
+    if (!groups.has(index)) groups.set(index, { index })
+    groups.get(index)[match[2]] = value
+  }
+  return [...groups.values()].sort((a, b) => a.index - b.index)
+}
+
 export function cacheAggregate(metricsByNode) {
-  const entries = Object.values(metricsByNode || {})
+  const entries = Object.values(metricsByNode || {}).filter(Boolean)
   const used = entries.reduce(
     (sum, metrics) =>
       reported(metrics.cache_bytes) ? sum + Number(metrics.cache_bytes) : sum,

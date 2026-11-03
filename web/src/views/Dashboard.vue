@@ -81,7 +81,7 @@ async function loadMetrics() {
   const entries = await Promise.all(
     nodes.value.map(async (node) => {
       try {
-        const response = await api.metrics.node(node.id)
+        const response = await api.metrics.node(node.id, { limit: 1 })
         return [node.id, response.latest || {}]
       } catch {
         return [node.id, metricsByNode.value[node.id] || {}]
@@ -219,7 +219,8 @@ onBeforeUnmount(() => {
           <template v-if="cacheTotals.complete">
             of {{ formatBytes(cacheTotals.capacity) }} · {{ formatBytes(cacheTotals.free) }} free
           </template>
-          <template v-else>Across all cache roots</template>
+          <template v-else-if="cacheTotals.used > 0">Across reporting cache roots</template>
+          <template v-else>Cache telemetry unavailable</template>
         </p>
       </div>
     </section>
