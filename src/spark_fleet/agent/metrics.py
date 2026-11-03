@@ -301,12 +301,24 @@ def cache_disk_usage(roots: Sequence[Path]) -> tuple[int, str | None]:
     """Sum inode-deduplicated cache bytes and report unreadable subtrees."""
 
     seen: set[tuple[int, int]] = set()
+    walked: set[tuple[int, int]] = set()
     total = 0
     errors = _ErrorLog()
-    for root in roots:
-        if not root.is_dir():
+    for root in sorted(roots, key=lambda path: len(path.parts)):
+        try:
+            info = root.stat()
+        except OSError:
+            continue
+        if not S_ISDIR(info.st_mode):
+            continue
+        if (info.st_dev, info.st_ino) in walked:
             continue
         for dirpath, _dirnames, filenames in os.walk(root, onerror=errors.add):
+            try:
+                dir_info = os.stat(dirpath)
+            except OSError:
+                continue
+            walked.add((dir_info.st_dev, dir_info.st_ino))
             for filename in filenames:
                 path = Path(dirpath) / filename
                 try:
@@ -360,13 +372,15 @@ def cache_filesystem_usage(
         resolved += 1
         total += usage.total
         free += usage.free
-    if not roots:
-        errors.add("no cache roots configured")
-    elif resolved == 0:
-        errors.add(
-            "no usable cache root: " + ", ".join(str(root) for root in roots)
-        )
     summary = errors.summary()
+    if not roots:
+        prefix = "no cache roots configured"
+    elif resolved == 0:
+        prefix = "no usable cache root: " + ", ".join(str(root) for root in roots)
+    else:
+        prefix = None
+    if prefix is not None:
+        summary = prefix + (f"; {summary}" if summary else "")
     if resolved == 0:
         return None, None, summary
     return total, free, summary

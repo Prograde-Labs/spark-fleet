@@ -634,6 +634,28 @@ def test_cache_disk_usage_dedupes_nested_roots(tmp_path):
     assert error is None
 
 
+def test_cache_disk_usage_dedupes_nested_roots_before_walking(tmp_path, monkeypatch):
+    root = tmp_path / "hub"
+    nested = root / "models"
+    nested.mkdir(parents=True)
+    (nested / "file").write_bytes(b"1234")
+    walk_calls = []
+
+    def fake_walk(path, onerror=None):
+        walk_calls.append(str(path))
+        yield str(path), ["models"] if path == root else [], []
+        if path == root:
+            yield str(nested), [], ["file"]
+
+    monkeypatch.setattr(metrics.os, "walk", fake_walk)
+
+    total, error = cache_disk_usage([root, nested])
+
+    assert total == 4
+    assert error is None
+    assert walk_calls == [str(root)]
+
+
 def test_cache_disk_usage_dedupes_hardlinked_files(tmp_path):
     first = tmp_path / "hub"
     second = tmp_path / "scratch"
@@ -820,10 +842,11 @@ def test_cache_filesystem_usage_summarizes_many_errors(tmp_path):
     total, free, error = cache_filesystem_usage(roots, stat=fake_stat)
 
     assert (total, free) == (None, None)
+    assert "no usable cache root" in error
     assert "error root-0" in error
     assert "error root-4" in error
     assert "error root-5" not in error
-    assert "... and 3 more" in error
+    assert "... and 2 more" in error
 
 
 def test_cache_filesystem_usage_keeps_five_errors_without_suffix(tmp_path):
@@ -835,6 +858,7 @@ def test_cache_filesystem_usage_keeps_five_errors_without_suffix(tmp_path):
     total, free, error = cache_filesystem_usage(roots, stat=fake_stat)
 
     assert (total, free) == (None, None)
+    assert "no usable cache root" in error
     assert "error root-3" in error
     assert "more" not in error
 
