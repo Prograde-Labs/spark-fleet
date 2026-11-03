@@ -52,14 +52,12 @@ export function cacheCaption(aggregate) {
 
 export function cacheDetail(aggregate) {
   const caption = cacheCaption(aggregate)
-  return {
-    caption,
-    showCapacity:
-      caption === 'complete' ||
-      (caption === 'partial' &&
-        aggregate.capacityReported > 0 &&
-        aggregate.reported === aggregate.usedWithCapacity),
-  }
+  const showCapacity =
+    aggregate.capacity > 0 &&
+    aggregate.used <= aggregate.capacity &&
+    (aggregate.reported === 0 ||
+      aggregate.reported === aggregate.usedWithCapacity)
+  return { caption, showCapacity }
 }
 
 export function cacheBarKnown(metrics) {

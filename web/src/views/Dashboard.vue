@@ -133,7 +133,8 @@ async function makePrimary(item) {
     notice.value = `${item.deployment.name} is now spark-active`
     await load({ force: true })
   } catch (exc) {
-    notice.value = exc.message || String(exc)
+    notice.value = null
+    error.value = exc.message || String(exc)
   } finally {
     busyPrimary.value = null
   }
@@ -238,15 +239,12 @@ onBeforeUnmount(() => {
         </div>
         <p class="stat-value mt-2">{{ formatBytes(cacheHeadline(cacheTotals)) }}</p>
         <p class="mt-1 font-mono text-[10px] text-faint">
-          <template v-if="cacheView.caption === 'complete'">
+          <template v-if="cacheView.showCapacity">
             of {{ formatBytes(cacheTotals.capacity) }} · {{ formatBytes(cacheTotals.free) }} free
+            <template v-if="cacheView.caption === 'partial'"> · partial</template>
           </template>
-          <template v-else-if="cacheView.caption === 'partial'">
-            <template v-if="cacheView.showCapacity">
-              of {{ formatBytes(cacheTotals.capacity) }} · {{ formatBytes(cacheTotals.free) }} free · partial
-            </template>
-            <template v-else>Across reporting cache roots</template>
-          </template>
+          <template v-else-if="cacheView.caption === 'complete'">Capacity undercounted</template>
+          <template v-else-if="cacheView.caption === 'partial'">Across reporting cache roots</template>
           <template v-else>Cache telemetry unavailable</template>
         </p>
       </div>

@@ -378,6 +378,12 @@ test('cacheDetail shows capacity only when every used reporter has capacity', ()
     ),
     { caption: 'partial', showCapacity: false },
   )
+  assert.deepEqual(
+    cacheDetail(
+      cacheAggregate({ a: { cache_bytes: 2000, cache_total_bytes: 1000, cache_free_bytes: 250 } }),
+    ),
+    { caption: 'complete', showCapacity: false },
+  )
   assert.deepEqual(cacheDetail(cacheAggregate({})), {
     caption: 'unavailable',
     showCapacity: false,
