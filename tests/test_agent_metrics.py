@@ -744,21 +744,19 @@ def test_cache_disk_usage_summarizes_many_errors(tmp_path, monkeypatch):
     assert "... and 2 more" in error
 
 
-def test_cache_disk_usage_records_empty_stat_error(tmp_path, monkeypatch):
+def test_cache_disk_usage_records_empty_stat_error(tmp_path):
     root = tmp_path / "hub"
     root.mkdir()
     (root / "good").write_bytes(b"1234")
     (root / "bad").write_bytes(b"x")
-    real_stat = Path.stat
+    real_stat = os.stat
 
-    def fake_stat(self, *args, **kwargs):
-        if self.name == "bad":
+    def fake_stat(path, *args, **kwargs):
+        if Path(path).name == "bad":
             raise OSError()
-        return real_stat(self, *args, **kwargs)
+        return real_stat(path, *args, **kwargs)
 
-    monkeypatch.setattr(Path, "stat", fake_stat)
-
-    total, error = cache_disk_usage([root])
+    total, error = cache_disk_usage([root], stat=fake_stat)
 
     assert total == 4
     assert error == "OSError"
@@ -786,7 +784,7 @@ def test_cache_filesystem_usage_probes_later_root_after_usage_failure(tmp_path):
 
     assert (total, free) == (1000, 250)
     assert calls == [first, second]
-    assert "first failed" in error
+    assert error == f"{first}: first failed"
 
 
 def test_cache_filesystem_usage_skips_duplicate_device_without_probing(tmp_path):
@@ -884,6 +882,7 @@ def test_cache_filesystem_usage_reports_missing_root_beside_valid_root(tmp_path)
 
     assert (total, free) == (1000, 250)
     assert f"{missing}: not found" in error
+    assert not error.startswith("no usable cache root")
 
 
 def test_cache_filesystem_usage_summarizes_many_errors(tmp_path):
@@ -899,7 +898,7 @@ def test_cache_filesystem_usage_summarizes_many_errors(tmp_path):
     assert "error root-0" in error
     assert "error root-4" in error
     assert "error root-5" not in error
-    assert "... and 2 more" in error
+    assert error.count("... and 2 more") == 2
 
 
 def test_cache_filesystem_usage_caps_root_prefix(tmp_path):
@@ -914,7 +913,6 @@ def test_cache_filesystem_usage_caps_root_prefix(tmp_path):
     assert "no usable cache root" in error
     assert "root-4" in error
     assert "root-5" not in error
-    assert error.count("... and 2 more") == 2
     assert error.count("... and 2 more") == 2
 
 

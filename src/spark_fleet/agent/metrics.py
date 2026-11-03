@@ -331,7 +331,7 @@ def cache_disk_usage(
             continue
         for dirpath, _dirnames, filenames in os.walk(root, onerror=errors.add):
             try:
-                dir_info = stat(dirpath)
+                dir_info = stat(Path(dirpath))
             except OSError as exc:
                 errors.add(exc)
                 continue
@@ -341,7 +341,7 @@ def cache_disk_usage(
                 try:
                     if path.is_symlink():
                         continue
-                    info = path.stat()
+                    info = stat(path)
                 except OSError as exc:
                     errors.add(exc)
                     continue
