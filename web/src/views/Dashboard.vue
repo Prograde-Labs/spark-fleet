@@ -21,6 +21,7 @@ import {
   statusTone,
 } from '../format'
 import { eventState } from '../stores/events'
+import { cacheAggregate } from '../metrics'
 import NodeCard from '../components/NodeCard.vue'
 import Topology from '../components/Topology.vue'
 
@@ -47,33 +48,7 @@ const primaryCandidates = computed(() =>
 const primaryDeployment = computed(
   () => primaryCandidates.value.find((item) => item.deployment.is_primary) || null,
 )
-const totalCache = computed(() =>
-  Object.values(metricsByNode.value).reduce(
-    (sum, m) => sum + Number(m.cache_bytes || 0),
-    0,
-  ),
-)
-const totalCacheCapacity = computed(() =>
-  Object.values(metricsByNode.value).reduce(
-    (sum, m) => sum + Number(m.cache_total_bytes || 0),
-    0,
-  ),
-)
-const totalCacheFree = computed(() =>
-  Object.values(metricsByNode.value).reduce(
-    (sum, m) => sum + Number(m.cache_free_bytes || 0),
-    0,
-  ),
-)
-const cacheCapacityComplete = computed(() => {
-  const values = Object.values(metricsByNode.value)
-  return (
-    totalCacheCapacity.value > 0 &&
-    values
-      .filter((m) => Number(m.cache_bytes || 0) > 0)
-      .every((m) => Number(m.cache_total_bytes || 0) > 0)
-  )
-})
+const cacheTotals = computed(() => cacheAggregate(metricsByNode.value))
 const onlineNodes = computed(
   () =>
     nodes.value.filter((node) => {
@@ -239,10 +214,10 @@ onBeforeUnmount(() => {
           <p class="hud-label">Model cache</p>
           <Database class="h-4 w-4 text-warning" />
         </div>
-        <p class="stat-value mt-2">{{ formatBytes(totalCache) }}</p>
+        <p class="stat-value mt-2">{{ formatBytes(cacheTotals.used) }}</p>
         <p class="mt-1 font-mono text-[10px] text-faint">
-          <template v-if="cacheCapacityComplete">
-            of {{ formatBytes(totalCacheCapacity) }} · {{ formatBytes(totalCacheFree) }} free
+          <template v-if="cacheTotals.complete">
+            of {{ formatBytes(cacheTotals.capacity) }} · {{ formatBytes(cacheTotals.free) }} free
           </template>
           <template v-else>Across all cache roots</template>
         </p>

@@ -12,6 +12,12 @@ import {
   Zap,
 } from 'lucide-vue-next'
 import { formatBytes, formatPercent, formatRelative } from '../format'
+import {
+  cacheCapacityKnown,
+  cachePercent,
+  gpuMemoryKnown,
+  gpuResident,
+} from '../metrics'
 
 const props = defineProps({
   node: { type: Object, required: true },
@@ -36,12 +42,8 @@ const ringOffset = computed(
 )
 const cacheTotal = computed(() => Number(props.metrics.cache_total_bytes || 0))
 const cacheFree = computed(() => Number(props.metrics.cache_free_bytes || 0))
-const cacheCapacityKnown = computed(() => cacheTotal.value > 0)
-const cachePercent = computed(() =>
-  cacheCapacityKnown.value
-    ? Math.min(100, (Number(props.metrics.cache_bytes || 0) / cacheTotal.value) * 100)
-    : 0,
-)
+const cacheKnown = computed(() => cacheCapacityKnown(props.metrics))
+const cacheBarPercent = computed(() => cachePercent(props.metrics))
 const containerPercent = computed(() =>
   total.value > 0
     ? Math.min(100, (Number(props.metrics.container_memory_bytes || 0) / total.value) * 100)
@@ -82,17 +84,6 @@ const gpuPercent = (gpu, key) => {
     return Math.min(100, ((gpu[usedKey] || 0) / gpu[totalKey]) * 100)
   }
   return Math.min(100, Number(gpu[key] || 0))
-}
-
-const gpuMemoryKnown = (gpu) =>
-  gpu.memory_total_bytes !== null &&
-  gpu.memory_total_bytes !== undefined &&
-  gpu.memory_used_bytes !== null &&
-  gpu.memory_used_bytes !== undefined
-
-const gpuResident = (gpu) => {
-  if (gpu.resident === null || gpu.resident === undefined) return null
-  return Number(gpu.resident) >= 1
 }
 </script>
 
@@ -185,11 +176,11 @@ const gpuResident = (gpu) => {
           <div class="mt-1 h-1.5 overflow-hidden rounded-full bg-edge">
             <div
               class="h-full rounded-full bg-violet/70 transition-all duration-700"
-              :style="{ width: `${cachePercent}%` }"
+              :style="{ width: `${cacheBarPercent}%` }"
             />
           </div>
           <p class="mt-1 font-mono text-[9px] text-faint">
-            <template v-if="cacheCapacityKnown">
+            <template v-if="cacheKnown">
               {{ formatBytes(cacheFree) }} free of {{ formatBytes(cacheTotal) }}
             </template>
             <template v-else>Capacity unavailable</template>
@@ -215,11 +206,19 @@ const gpuResident = (gpu) => {
           <span class="flex items-center gap-3 font-mono text-[10px] text-dim">
             <span class="flex items-center gap-1">
               <Zap class="h-3 w-3 text-cyan" />
-              {{ formatPercent(gpu.utilization_percent) }}
+              {{
+                gpu.utilization_percent === null || gpu.utilization_percent === undefined
+                  ? 'N/A'
+                  : formatPercent(gpu.utilization_percent)
+              }}
             </span>
             <span class="flex items-center gap-1">
               <Thermometer class="h-3 w-3 text-warning" />
-              {{ gpu.temperature_celsius ?? '—' }}°C
+              {{
+                gpu.temperature_celsius === null || gpu.temperature_celsius === undefined
+                  ? 'N/A'
+                  : `${gpu.temperature_celsius}°C`
+              }}
             </span>
             <span
               v-if="gpuResident(gpu) !== null"
