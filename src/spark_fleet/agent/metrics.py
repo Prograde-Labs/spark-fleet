@@ -70,8 +70,8 @@ class MetricsSnapshot:
     containers: tuple[ContainerInfo, ...]
     container_memory_bytes: int
     cache_bytes: int
-    cache_total_bytes: int
-    cache_free_bytes: int
+    cache_total_bytes: int | None
+    cache_free_bytes: int | None
     gpus: tuple[GpuInfo, ...]
     errors: Mapping[str, str]
 
@@ -297,6 +297,10 @@ def cache_disk_usage(roots: Sequence[Path]) -> tuple[int, str | None]:
     return total, None
 
 
+def _error_text(exc: BaseException) -> str:
+    return str(exc) or type(exc).__name__
+
+
 def cache_filesystem_usage(
     roots: Sequence[Path],
     *,
@@ -314,16 +318,20 @@ def cache_filesystem_usage(
         try:
             info = stat(root)
         except FileNotFoundError:
+            errors.append(f"{root}: not found")
             continue
         except OSError as exc:
-            errors.append(f"{root}: {exc}")
+            errors.append(f"{root}: {_error_text(exc)}")
             continue
-        if not S_ISDIR(info.st_mode) or info.st_dev in seen:
+        if not S_ISDIR(info.st_mode):
+            errors.append(f"{root}: not a directory")
+            continue
+        if info.st_dev in seen:
             continue
         try:
             usage = disk_usage(root)
         except OSError as exc:
-            errors.append(f"{root}: {exc}")
+            errors.append(f"{root}: {_error_text(exc)}")
             continue
         seen.add(info.st_dev)
         resolved += 1
@@ -370,23 +378,24 @@ def collect_metrics(
             cache_bytes = cache_sampler()
         except Exception as exc:
             cache_bytes = 0
-            cache_errors.append(str(exc))
+            cache_errors.append(_error_text(exc))
     else:
         cache_bytes, cache_error = cache_disk_usage(cache_roots)
-        if cache_error is not None:
+        if cache_error:
             cache_errors.append(cache_error)
 
     if cache_usage_sampler is not None:
         try:
             cache_total_bytes, cache_free_bytes, usage_error = cache_usage_sampler()
         except Exception as exc:
-            cache_total_bytes, cache_free_bytes = 0, 0
-            usage_error = str(exc)
+            cache_total_bytes, cache_free_bytes = None, None
+            usage_error = _error_text(exc)
     else:
         cache_total_bytes, cache_free_bytes, usage_error = cache_filesystem_usage(
             cache_roots
         )
-    if usage_error is not None:
+    if usage_error:
+        cache_total_bytes, cache_free_bytes = None, None
         cache_errors.append(usage_error)
     if cache_errors:
         errors["cache"] = "; ".join(cache_errors)

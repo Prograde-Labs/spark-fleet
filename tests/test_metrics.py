@@ -2,6 +2,7 @@
 
 import pytest
 
+from spark_fleet.agent.metrics import GpuInfo, MetricsSnapshot, snapshot_to_dict
 from spark_fleet.controller.metrics import (
     CACHE_BYTES,
     CACHE_FREE,
@@ -132,6 +133,43 @@ def test_record_node_snapshot_coerces_gpu_residency_boolean(store):
     assert "gpu.2.compute_memory_bytes" not in latest
     assert "gpu.3.resident" not in latest
     assert latest["gpu.3.compute_processes"] == 1.0
+
+
+def test_agent_snapshot_serializer_feeds_controller_series(store):
+    snapshot = MetricsSnapshot(
+        sampled_at=1.0,
+        host_total_bytes=1000,
+        host_available_bytes=500,
+        containers=(),
+        container_memory_bytes=0,
+        cache_bytes=100,
+        cache_total_bytes=10_000,
+        cache_free_bytes=4_000,
+        gpus=(
+            GpuInfo(
+                index=0,
+                name="NVIDIA GB10",
+                memory_total_bytes=None,
+                memory_used_bytes=None,
+                utilization_percent=95,
+                temperature_celsius=60,
+                uuid="GPU-aaa",
+                compute_processes=1,
+                compute_memory_bytes=512,
+            ),
+        ),
+        errors={},
+    )
+
+    store.record_node_snapshot("spark-01", snapshot_to_dict(snapshot), ts=1234.0)
+
+    latest = store.latest_node_metrics("spark-01")
+    assert latest[CACHE_BYTES] == 100.0
+    assert latest[CACHE_TOTAL] == 10_000.0
+    assert latest[CACHE_FREE] == 4_000.0
+    assert latest["gpu.0.compute_processes"] == 1.0
+    assert latest["gpu.0.compute_memory_bytes"] == 512.0
+    assert latest["gpu.0.resident"] == 1.0
 
 
 def test_record_node_snapshot_skips_missing_and_invalid_values(store):
