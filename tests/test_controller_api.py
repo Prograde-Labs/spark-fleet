@@ -1050,6 +1050,7 @@ def test_gateway_models_falls_back_to_upstream_context(env):
     assert [item["id"] for item in data] == ["GLM", "glm"]
     for item in data:
         assert item["max_model_len"] == 131072
+        assert item["context_length"] == 131072
 
 
 def test_gateway_proxy_returns_upstream_response(env):

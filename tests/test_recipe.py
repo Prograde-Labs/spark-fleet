@@ -36,6 +36,9 @@ SHIPPED_RECIPE_PATHS = sorted((ROOT / "recipes").glob("*.yaml"))
 # serving limit from the upstream model card.
 UPSTREAM_CONTEXT_RECIPES = {"demo-llamacpp"}
 
+# These recipes intentionally carry no model.
+MODEL_LESS_RECIPES = {"comfyui", "demo-log-server"}
+
 DEPLOYMENT = {
     "apiVersion": "spark-fleet/v1",
     "kind": "Recipe",
@@ -231,6 +234,9 @@ def test_shipped_recipes_are_present():
 def test_shipped_recipes_parse_and_declare_context(path):
     recipe = load_recipe_file(path)
     if recipe.spec.model is None:
+        assert path.stem in MODEL_LESS_RECIPES, (
+            f"{path.name} has no model but is not in MODEL_LESS_RECIPES"
+        )
         return
     if path.stem in UPSTREAM_CONTEXT_RECIPES:
         assert recipe.spec.model.context_length is None

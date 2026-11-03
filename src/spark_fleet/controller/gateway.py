@@ -412,9 +412,10 @@ class FleetGateway:
                         and value > 0
                     ):
                         return value
-                    # An unusable n_ctx means the serving limit is unknown;
-                    # falling back to the training limit would overstate it.
-                    return None
+                    # An unusable n_ctx means this entry's serving limit is
+                    # unknown; falling back to the training limit would
+                    # overstate it, so try the next candidate.
+                    continue
                 value = meta.get("n_ctx_train")
                 if isinstance(value, int) and not isinstance(value, bool) and value > 0:
                     return value

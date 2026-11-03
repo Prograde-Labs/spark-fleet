@@ -499,6 +499,13 @@ async def test_models_omits_context_when_upstream_fails(db):
         ),
         httpx.Response(
             200,
+            json={
+                "object": "list",
+                "data": [{"id": "Demo-Model-B", "meta": {"n_ctx": "32768", "n_ctx_train": 131072}}],
+            },
+        ),
+        httpx.Response(
+            200,
             json={"object": "list", "data": [{"id": "/models/x.gguf", "meta": {"n_ctx": 0}}]},
         ),
     ],
@@ -516,6 +523,28 @@ async def test_models_omits_context_for_bad_upstream_payload(db, response):
     for item in body["data"]:
         assert "max_model_len" not in item
         assert "context_length" not in item
+
+
+async def test_models_skips_unusable_meta_and_uses_next_candidate(db):
+    add_deployment(db, served_name="Demo-Model-B")
+
+    def handler(request):
+        return httpx.Response(
+            200,
+            json={
+                "object": "list",
+                "data": [
+                    {"id": "Demo-Model-B", "meta": {"n_ctx": 0}},
+                    {"id": "Demo-Model-B", "max_model_len": 262144},
+                ],
+            },
+        )
+
+    async with FleetGateway(db, transport=httpx.MockTransport(handler)) as gateway:
+        body = await gateway.models()
+
+    assert {item["max_model_len"] for item in body["data"]} == {262144}
+    assert {item["context_length"] for item in body["data"]} == {262144}
 
 
 async def test_models_ignores_non_mapping_upstream_entries(db):
