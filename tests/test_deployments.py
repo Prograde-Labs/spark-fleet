@@ -1188,6 +1188,51 @@ async def test_check_readiness_http_uses_inference_port(db, registry):
     assert urls == ["http://192.0.2.239:8000/health"]
 
 
+async def test_check_readiness_http_fails_fast_when_container_restarts(db, registry):
+    async def http_probe(url, timeout):
+        raise AssertionError("the HTTP probe should not run for a restarting container")
+
+    client = StatusClient(
+        [{"id": "cid", "state": "restarting", "status": "Restarting (1) 2 seconds ago"}]
+    )
+
+    with pytest.raises(DeploymentError, match="restarting"):
+        await check_readiness(
+            readiness_role(
+                db,
+                type="http",
+                path="/v1/models",
+                port=8000,
+                timeout_seconds=30,
+                interval_seconds=1,
+            ),
+            node(registry),
+            "project",
+            client,
+            "cid",
+            http_probe=http_probe,
+        )
+
+
+async def test_check_readiness_tcp_fails_fast_when_container_exited(db, registry):
+    async def tcp_probe(host, port, timeout):
+        raise AssertionError("the TCP probe should not run for an exited container")
+
+    client = StatusClient(
+        [{"id": "cid", "state": "exited", "status": "Exited (1) 2 seconds ago"}]
+    )
+
+    with pytest.raises(DeploymentError, match="exited"):
+        await check_readiness(
+            readiness_role(db, type="tcp", port=8000, timeout_seconds=30, interval_seconds=1),
+            node(registry),
+            "project",
+            client,
+            "cid",
+            tcp_probe=tcp_probe,
+        )
+
+
 async def test_check_readiness_tcp(db, registry):
     calls = []
 

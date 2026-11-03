@@ -6,6 +6,7 @@ import httpx
 import pytest
 
 from spark_fleet.controller.agent_client import (
+    COMPOSE_TIMEOUT_SECONDS,
     STREAM_TIMEOUT,
     AgentClient,
     AgentError,
@@ -97,6 +98,25 @@ async def test_up_down_and_status_compose():
     assert json.loads(recorder.requests[1].content) == {"project": "p"}
     assert recorder.requests[2].url.path == "/compose/status"
     assert recorder.requests[2].url.params["project"] == "p"
+
+
+async def test_compose_lifecycle_uses_long_timeout():
+    recorder = Recorder(
+        [
+            json_response({"containers": []}),
+            json_response({"ok": True}),
+        ]
+    )
+    compose = {"services": {"workload": {"image": "alpine"}}}
+    async with AgentClient(
+        "http://agent:8092", TOKEN, transport=httpx.MockTransport(recorder)
+    ) as client:
+        await client.up_compose("p", compose)
+        await client.down_compose("p")
+
+    for request in recorder.requests:
+        assert request.extensions["timeout"]["read"] == COMPOSE_TIMEOUT_SECONDS
+    assert COMPOSE_TIMEOUT_SECONDS > 10
 
 
 async def test_container_logs_returns_text():

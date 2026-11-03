@@ -17,6 +17,10 @@ from urllib.parse import quote, urlparse
 import httpx
 
 DEFAULT_TIMEOUT_SECONDS = 10.0
+# Compose up/down can take far longer than a status call: a large model
+# container may need tens of seconds to shut down. Keep the short default for
+# probes and use this for lifecycle mutations.
+COMPOSE_TIMEOUT_SECONDS = 300.0
 STREAM_TIMEOUT = httpx.Timeout(DEFAULT_TIMEOUT_SECONDS, read=None)
 
 
@@ -90,11 +94,17 @@ class AgentClient:
             "POST",
             "/compose/up",
             json_body={"project": project, "compose": dict(compose)},
+            timeout=COMPOSE_TIMEOUT_SECONDS,
         )
         return _require_list(payload, "containers", "compose up")
 
     async def down_compose(self, project: str) -> None:
-        await self._request("POST", "/compose/down", json_body={"project": project})
+        await self._request(
+            "POST",
+            "/compose/down",
+            json_body={"project": project},
+            timeout=COMPOSE_TIMEOUT_SECONDS,
+        )
 
     async def compose_status(self, project: str) -> list[dict[str, Any]]:
         payload = await self._request("GET", "/compose/status", params={"project": project})
@@ -255,6 +265,7 @@ class AgentClient:
         auth: bool = True,
         json_body: Any = None,
         params: Mapping[str, Any] | None = None,
+        timeout: float | None = None,
     ) -> Any:
         headers = self._auth_headers() if auth else {}
         try:
@@ -264,6 +275,7 @@ class AgentClient:
                 json=json_body,
                 params=params,
                 headers=headers,
+                timeout=timeout,
             )
         except httpx.HTTPError as exc:
             raise AgentUnreachableError(f"{method} {path} failed: {exc}") from exc

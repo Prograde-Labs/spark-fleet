@@ -825,6 +825,17 @@ async def _probe(
     if readiness.type == "container-health":
         statuses = await client.compose_status(project)
         return any(_container_healthy(status) for status in statuses)
+    if readiness.type in ("http", "tcp"):
+        # A port probe alone cannot distinguish a loading server from a
+        # crash-looping container: Docker keeps the port closed while it
+        # restarts, so the probe would wait out the full timeout. Fail fast
+        # when the role container has exited, died, or is restarting.
+        status = await _first_container_status(client, project, container_id)
+        if status is not None and status.get("state") in ("exited", "dead", "restarting"):
+            detail = status.get("status") or status.get("state")
+            raise DeploymentError(
+                f"role {role.name} container is {status.get('state')} ({detail})"
+            )
     if readiness.type == "http":
         port = readiness.port or role.inference_port
         if port is None:
@@ -852,6 +863,17 @@ async def _probe(
         except TimeoutError:
             return False
     raise DeploymentError(f"role {role.name} has unknown readiness type {readiness.type!r}")
+
+
+async def _first_container_status(
+    client: AgentClient, project: str, container_id: str | None
+) -> Mapping[str, Any] | None:
+    statuses = await client.compose_status(project)
+    if container_id:
+        for status in statuses:
+            if status.get("id") == container_id:
+                return status
+    return statuses[0] if statuses else None
 
 
 async def _consume_logs(client: AgentClient, container_id: str, pattern: re.Pattern[str]) -> bool:
