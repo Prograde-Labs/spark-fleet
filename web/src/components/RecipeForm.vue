@@ -198,7 +198,7 @@ function setReadinessType(role, type) {
           <input v-model="spec.model.revision" class="input mt-1" placeholder="main / commit" />
         </div>
         <div>
-          <label class="hud-label">Context length (tokens)</label>
+          <label class="hud-label">Context limit (tokens, informational)</label>
           <input
             v-model.number="spec.model.contextLength"
             class="input mt-1"

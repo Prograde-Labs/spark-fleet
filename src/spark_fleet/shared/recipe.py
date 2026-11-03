@@ -69,9 +69,14 @@ class ModelSpec(StrictModel):
     served_name: str = Field(alias="servedName", pattern=ALIAS_PATTERN)
     revision: str | None = None
     extra_repos: list[str] = Field(default_factory=list, alias="extraRepos")
-    context_length: StrictInt | None = Field(
-        default=None, alias="contextLength", ge=1
-    )
+    context_length: int | None = Field(default=None, alias="contextLength", ge=1)
+
+    @field_validator("context_length", mode="before")
+    @classmethod
+    def _reject_bool_context_length(cls, value: Any) -> Any:
+        if isinstance(value, bool):
+            raise ValueError("contextLength must be an integer")
+        return value
 
     @field_validator("extra_repos")
     @classmethod

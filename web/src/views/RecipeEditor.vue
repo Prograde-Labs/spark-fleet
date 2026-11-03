@@ -171,7 +171,10 @@ function normalizeNumbers() {
     const raw = spec.model.contextLength
     if (raw === '') {
       delete spec.model.contextLength
-    } else if (raw !== undefined && raw !== null) {
+    } else if (
+      typeof raw === 'number' ||
+      (typeof raw === 'string' && raw.trim() !== '')
+    ) {
       const value = Number(raw)
       if (Number.isInteger(value) && value >= 1) {
         spec.model.contextLength = value
