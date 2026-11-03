@@ -487,41 +487,61 @@ async def test_models_retries_upstream_after_a_failed_lookup(db, monkeypatch):
 
     import spark_fleet.controller.gateway as gateway_module
 
-    monkeypatch.setattr(gateway_module, "UPSTREAM_CONTEXT_NEGATIVE_TTL_SECONDS", 0.0)
-
     async with FleetGateway(db, transport=httpx.MockTransport(handler)) as gateway:
         first = await gateway.models()
         second = await gateway.models()
+        assert len(calls) == 1
+        monkeypatch.setattr(gateway_module, "UPSTREAM_CONTEXT_NEGATIVE_TTL_SECONDS", 0.0)
+        third = await gateway.models()
 
     assert len(calls) == 2
     for item in first["data"]:
         assert "max_model_len" not in item
-    assert {item["max_model_len"] for item in second["data"]} == {262144}
+    for item in second["data"]:
+        assert "max_model_len" not in item
+    assert {item["max_model_len"] for item in third["data"]} == {262144}
 
 
 async def test_models_prunes_stale_context_cache(db):
     add_deployment(db)
+    add_deployment(
+        db,
+        "dep-2",
+        "other",
+        node="spark-02",
+        lan_ip="192.0.2.79",
+        served_name="OTHER",
+        aliases=("other",),
+        port=8889,
+    )
     calls = []
 
     def handler(request):
         calls.append(str(request.url))
+        served = "OTHER" if request.url.port == 8889 else "Demo-Model-B"
         return httpx.Response(
             200,
-            json={"object": "list", "data": [{"id": "Demo-Model-B", "max_model_len": 262144}]},
+            json={
+                "object": "list",
+                "data": [{"id": served, "max_model_len": 262144}],
+            },
         )
 
     async with FleetGateway(db, transport=httpx.MockTransport(handler)) as gateway:
         await gateway.models()
-        assert gateway._context_cache
+        assert len(gateway._context_cache) == 2
         db.delete_deployment("dep-1")
         body = await gateway.models()
 
-    assert body["data"] == []
-    assert gateway._context_cache == {}
+    assert [item["id"] for item in body["data"]] == ["OTHER", "other"]
+    assert len(gateway._context_cache) == 1
+    assert ("http://192.0.2.79:8889", "OTHER") in gateway._context_cache
 
 
 async def test_models_handles_invalid_upstream_url(db):
-    async with FleetGateway(db) as gateway:
+    async with FleetGateway(
+        db, transport=httpx.MockTransport(lambda request: pytest.fail("network call"))
+    ) as gateway:
         assert await gateway._fetch_upstream_context("http://::1:8888", "X") is None
 
 
@@ -535,11 +555,50 @@ async def test_models_brackets_ipv6_upstream_url(db):
         recipe("v6", "spark-v6", "V6"),
         status="loaded",
     )
+    seen = {}
 
-    async with FleetGateway(db) as gateway:
+    def handler(request):
+        seen["url"] = request.url
+        return httpx.Response(200, json={"ok": True})
+
+    async with FleetGateway(db, transport=httpx.MockTransport(handler)) as gateway:
         route = gateway.resolve("V6")
+        await gateway.proxy(
+            "V6",
+            "POST",
+            "/v1/chat/completions",
+            {"Content-Type": "application/json"},
+            b"{}",
+        )
 
     assert route.upstream_url == "http://[fd00::1]:8888"
+    assert seen["url"] == httpx.URL("http://[fd00::1]:8888/v1/chat/completions")
+
+
+async def test_proxy_reports_invalid_upstream_url_as_502(db):
+    add_node(db, "spark-bad", "bad:host")
+    db.create_deployment(
+        "dep-bad",
+        "bad",
+        "bad",
+        "deployment",
+        recipe("bad", "spark-bad", "BAD"),
+        status="loaded",
+    )
+
+    async with FleetGateway(
+        db, transport=httpx.MockTransport(lambda request: pytest.fail("network call"))
+    ) as gateway:
+        with pytest.raises(GatewayError) as excinfo:
+            await gateway.proxy(
+                "BAD",
+                "POST",
+                "/v1/chat/completions",
+                {"Content-Type": "application/json"},
+                b"{}",
+            )
+
+    assert excinfo.value.status_code == 502
 
 
 async def test_proxy_rewrites_model_and_records_usage(db):

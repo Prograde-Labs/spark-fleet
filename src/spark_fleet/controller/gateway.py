@@ -336,9 +336,7 @@ class FleetGateway:
             }
         )
         if not keys:
-            for key in list(self._context_cache):
-                if key not in keys:
-                    del self._context_cache[key]
+            self._context_cache.clear()
             return {}
         for key in list(self._context_cache):
             if key not in keys:
@@ -413,11 +411,11 @@ class FleetGateway:
         body: bytes,
     ) -> httpx.Response:
         route = self.resolve(model)
-        request = self._build_request(route, model, method, path, headers, body)
         started = time.perf_counter()
         try:
+            request = self._build_request(route, model, method, path, headers, body)
             response = await self._client.send(request)
-        except httpx.HTTPError as exc:
+        except (httpx.HTTPError, httpx.InvalidURL) as exc:
             self.counters.record(
                 route.deployment_id,
                 status_code=502,
@@ -444,11 +442,11 @@ class FleetGateway:
         body: bytes,
     ) -> StreamProxy:
         route = self.resolve(model)
-        request = self._build_request(route, model, method, path, headers, body)
         started = time.perf_counter()
         try:
+            request = self._build_request(route, model, method, path, headers, body)
             upstream = await self._client.send(request, stream=True)
-        except httpx.HTTPError as exc:
+        except (httpx.HTTPError, httpx.InvalidURL) as exc:
             self.counters.record(
                 route.deployment_id,
                 status_code=502,
