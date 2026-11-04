@@ -1,6 +1,6 @@
 <script setup>
 import { computed, onMounted, ref, watch } from 'vue'
-import yaml from 'js-yaml'
+import * as yaml from 'js-yaml'
 import {
   ArrowRightLeft,
   Check,
