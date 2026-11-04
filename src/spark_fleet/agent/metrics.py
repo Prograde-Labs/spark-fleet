@@ -28,10 +28,7 @@ from spark_fleet.agent.containers import ContainerInfo
 
 MEMINFO_PATH = Path("/proc/meminfo")
 GPU_TIMEOUT_SECONDS = 5.0
-GPU_QUERY = (
-    "--query-gpu=index,name,memory.total,memory.used,utilization.gpu,"
-    "temperature.gpu,uuid"
-)
+GPU_QUERY = "--query-gpu=index,name,memory.total,memory.used,utilization.gpu,temperature.gpu,uuid"
 COMPUTE_QUERY = "--query-compute-apps=gpu_uuid,pid,process_name,used_memory"
 _GPU_FORMAT = "--format=csv,noheader,nounits"
 _MEMINFO_RE = re.compile(r"^\s*(MemTotal|MemAvailable):\s+(\d+)\s+kB\s*$")
@@ -160,23 +157,15 @@ def collect_gpus(
     if remaining <= 0:
         errors.append("could not query compute processes: no time budget remaining")
         return tuple(gpus), "; ".join(errors)
-    compute_counts, compute_error = _collect_compute_apps(
-        timeout=remaining, runner=runner
-    )
+    compute_counts, compute_error = _collect_compute_apps(timeout=remaining, runner=runner)
     if compute_error is not None:
         errors.append(compute_error)
     else:
         known = {gpu.uuid for gpu in gpus if gpu.uuid is not None}
         unmatched = sorted(set(compute_counts) - known)
         if unmatched:
-            errors.append(
-                "could not attribute compute processes: " + ", ".join(unmatched)
-            )
-        gpus = list(
-            _apply_compute_apps(
-                gpus, compute_counts, all_attributed=not unmatched
-            )
-        )
+            errors.append("could not attribute compute processes: " + ", ".join(unmatched))
+        gpus = list(_apply_compute_apps(gpus, compute_counts, all_attributed=not unmatched))
     return tuple(gpus), "; ".join(errors) or None
 
 
@@ -197,8 +186,7 @@ def _collect_compute_apps(
         return {}, "could not query compute processes: nvidia-smi not available"
     except subprocess.TimeoutExpired:
         return {}, (
-            "could not query compute processes: timed out after "
-            f"{timeout:.1f}s of remaining budget"
+            f"could not query compute processes: timed out after {timeout:.1f}s of remaining budget"
         )
     except OSError as exc:
         return {}, f"could not query compute processes: {exc}"
@@ -231,8 +219,7 @@ def _collect_compute_apps(
             counts[uuid] = (1, memory_bytes)
     if parse_errors:
         return counts, (
-            "could not parse nvidia-smi compute-apps output: "
-            + "; ".join(parse_errors)
+            "could not parse nvidia-smi compute-apps output: " + "; ".join(parse_errors)
         )
     return counts, None
 
@@ -249,9 +236,7 @@ def _apply_compute_apps(
             if all_attributed:
                 # Every compute row matched a known GPU (or none exist), so this
                 # device cannot be running a compute process.
-                updated.append(
-                    replace(gpu, compute_processes=0, compute_memory_bytes=0)
-                )
+                updated.append(replace(gpu, compute_processes=0, compute_memory_bytes=0))
             else:
                 # Unattributable rows exist, so this device's residency is
                 # unknown rather than provably idle.
@@ -282,9 +267,7 @@ class _ErrorLog:
 
     def add(self, error: BaseException | str) -> None:
         if len(self._messages) < self._limit:
-            self._messages.append(
-                _error_text(error) if isinstance(error, BaseException) else error
-            )
+            self._messages.append(_error_text(error) if isinstance(error, BaseException) else error)
         else:
             self._extra += 1
 
@@ -410,9 +393,7 @@ def collect_metrics(
     meminfo_path: Path = MEMINFO_PATH,
     container_sampler: Callable[[], Sequence[ContainerInfo]] | None = None,
     cache_sampler: Callable[[], int] | None = None,
-    cache_usage_sampler: (
-        Callable[[], tuple[int | None, int | None, str | None]] | None
-    ) = None,
+    cache_usage_sampler: (Callable[[], tuple[int | None, int | None, str | None]] | None) = None,
     gpu_sampler: Callable[[], tuple[tuple[GpuInfo, ...], str | None]] | None = None,
     clock: Callable[[], float] = time.time,
 ) -> MetricsSnapshot:
@@ -454,9 +435,7 @@ def collect_metrics(
             cache_total_bytes, cache_free_bytes = None, None
             usage_error = _error_text(exc)
     else:
-        cache_total_bytes, cache_free_bytes, usage_error = cache_filesystem_usage(
-            cache_roots
-        )
+        cache_total_bytes, cache_free_bytes, usage_error = cache_filesystem_usage(cache_roots)
     if usage_error:
         cache_errors.append(usage_error)
     if cache_bytes is None and not bytes_failed:
@@ -526,11 +505,7 @@ def snapshot_to_dict(snapshot: MetricsSnapshot) -> dict[str, Any]:
                 "uuid": gpu.uuid,
                 "compute_processes": gpu.compute_processes,
                 "compute_memory_bytes": gpu.compute_memory_bytes,
-                "resident": (
-                    None
-                    if gpu.compute_processes is None
-                    else gpu.compute_processes > 0
-                ),
+                "resident": (None if gpu.compute_processes is None else gpu.compute_processes > 0),
             }
             for gpu in snapshot.gpus
         ],

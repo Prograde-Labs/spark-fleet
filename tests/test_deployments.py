@@ -1218,9 +1218,7 @@ async def test_check_readiness_tcp_fails_fast_when_container_exited(db, registry
     async def tcp_probe(host, port, timeout):
         raise AssertionError("the TCP probe should not run for an exited container")
 
-    client = StatusClient(
-        [{"id": "cid", "state": "exited", "status": "Exited (1) 2 seconds ago"}]
-    )
+    client = StatusClient([{"id": "cid", "state": "exited", "status": "Exited (1) 2 seconds ago"}])
 
     with pytest.raises(DeploymentError, match="exited"):
         await check_readiness(

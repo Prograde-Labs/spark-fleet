@@ -251,9 +251,7 @@ class FleetGateway:
                 aliases=frozenset(aliases),
                 upstream_url=_upstream_url(node["lan_ip"], head.inference_port),
                 status="loaded" if status == "loaded" else "loading",
-                context_length=(
-                    recipe.spec.model.context_length if recipe.spec.model else None
-                ),
+                context_length=(recipe.spec.model.context_length if recipe.spec.model else None),
             )
             for alias in aliases:
                 existing = routes.get(alias)
@@ -371,9 +369,7 @@ class FleetGateway:
                 results[key] = value
         return results
 
-    async def _fetch_upstream_context(
-        self, upstream_url: str, served_name: str
-    ) -> int | None:
+    async def _fetch_upstream_context(self, upstream_url: str, served_name: str) -> int | None:
         try:
             response = await self._client.get(
                 f"{upstream_url}/v1/models",
@@ -406,11 +402,7 @@ class FleetGateway:
             if isinstance(meta, Mapping):
                 if "n_ctx" in meta:
                     value = meta["n_ctx"]
-                    if (
-                        isinstance(value, int)
-                        and not isinstance(value, bool)
-                        and value > 0
-                    ):
+                    if isinstance(value, int) and not isinstance(value, bool) and value > 0:
                         return value
                     # An unusable n_ctx means this entry's serving limit is
                     # unknown; falling back to the training limit would

@@ -833,9 +833,7 @@ async def _probe(
         status = await _first_container_status(client, project, container_id)
         if status is not None and status.get("state") in ("exited", "dead", "restarting"):
             detail = status.get("status") or status.get("state")
-            raise DeploymentError(
-                f"role {role.name} container is {status.get('state')} ({detail})"
-            )
+            raise DeploymentError(f"role {role.name} container is {status.get('state')} ({detail})")
     if readiness.type == "http":
         port = readiness.port or role.inference_port
         if port is None:

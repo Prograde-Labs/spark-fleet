@@ -189,8 +189,7 @@ def test_collect_gpus_parses_output():
     )
     assert calls[0][0] == [
         "nvidia-smi",
-        "--query-gpu=index,name,memory.total,memory.used,utilization.gpu,"
-        "temperature.gpu,uuid",
+        "--query-gpu=index,name,memory.total,memory.used,utilization.gpu,temperature.gpu,uuid",
         "--format=csv,noheader,nounits",
     ]
     assert calls[0][1]["capture_output"] is True
@@ -223,9 +222,7 @@ def test_collect_gpus_handles_unsupported_fields_and_quoted_names():
 def test_collect_gpus_keeps_valid_rows_when_one_is_malformed():
     stdout = "0, NVIDIA GB10, 65536, 1024, 5, 40, GPU-aaa\nnot,a,valid,row\n"
 
-    gpus, error = collect_gpus(
-        runner=dispatch_runner(gpu_stdout=stdout, compute_stdout="")
-    )
+    gpus, error = collect_gpus(runner=dispatch_runner(gpu_stdout=stdout, compute_stdout=""))
 
     assert len(gpus) == 1
     assert gpus[0].index == 0
@@ -335,9 +332,7 @@ def test_collect_gpus_reports_compute_app_timeout():
 def test_collect_gpus_reports_compute_app_parse_error_as_unknown():
     compute = "GPU-aaa, 111, python, 512\nnot,a,valid,row,extra\n"
 
-    gpus, error = collect_gpus(
-        runner=dispatch_runner(gpu_stdout=GPU_CSV, compute_stdout=compute)
-    )
+    gpus, error = collect_gpus(runner=dispatch_runner(gpu_stdout=GPU_CSV, compute_stdout=compute))
 
     assert [gpu.compute_processes for gpu in gpus] == [None, None]
     assert "could not parse nvidia-smi compute-apps output" in error
@@ -346,9 +341,7 @@ def test_collect_gpus_reports_compute_app_parse_error_as_unknown():
 def test_collect_gpus_rejects_bracketed_compute_uuid():
     compute = "[N/A], 111, python, 512\n"
 
-    gpus, error = collect_gpus(
-        runner=dispatch_runner(gpu_stdout=GPU_CSV, compute_stdout=compute)
-    )
+    gpus, error = collect_gpus(runner=dispatch_runner(gpu_stdout=GPU_CSV, compute_stdout=compute))
 
     assert [gpu.compute_processes for gpu in gpus] == [None, None]
     assert "could not parse nvidia-smi compute-apps output" in error
@@ -371,27 +364,28 @@ def test_collect_gpus_reports_missing_gpu_uuid_when_compute_rows_exist():
 def test_collect_gpus_marks_uuidless_gpu_idle_when_compute_query_is_empty():
     gpu_csv = "0, NVIDIA GB10, 65536, [N/A], 5, 40, [N/A]\n"
 
-    gpus, error = collect_gpus(
-        runner=dispatch_runner(gpu_stdout=gpu_csv, compute_stdout="")
-    )
+    gpus, error = collect_gpus(runner=dispatch_runner(gpu_stdout=gpu_csv, compute_stdout=""))
 
     assert error is None
     assert gpus[0].compute_processes == 0
     assert gpus[0].compute_memory_bytes == 0
-    assert snapshot_to_dict(
-        MetricsSnapshot(
-            sampled_at=1.0,
-            host_total_bytes=1000,
-            host_available_bytes=500,
-            containers=(),
-            container_memory_bytes=0,
-            cache_bytes=0,
-            cache_total_bytes=0,
-            cache_free_bytes=0,
-            gpus=gpus,
-            errors={},
-        )
-    )["gpus"][0]["resident"] is False
+    assert (
+        snapshot_to_dict(
+            MetricsSnapshot(
+                sampled_at=1.0,
+                host_total_bytes=1000,
+                host_available_bytes=500,
+                containers=(),
+                container_memory_bytes=0,
+                cache_bytes=0,
+                cache_total_bytes=0,
+                cache_free_bytes=0,
+                gpus=gpus,
+                errors={},
+            )
+        )["gpus"][0]["resident"]
+        is False
+    )
 
 
 def test_collect_gpus_shares_timeout_budget():
@@ -404,9 +398,7 @@ def test_collect_gpus_shares_timeout_budget():
             return completed(args, stdout="")
         return completed(args, stdout=GPU_CSV)
 
-    gpus, error = collect_gpus(
-        runner=runner, timeout=5.0, clock=lambda: next(ticks)
-    )
+    gpus, error = collect_gpus(runner=runner, timeout=5.0, clock=lambda: next(ticks))
 
     assert error is None
     assert calls[1][1]["timeout"] == pytest.approx(3.5)
@@ -420,9 +412,7 @@ def test_collect_gpus_skips_compute_query_when_budget_is_exhausted():
         calls.append((args, kwargs))
         return completed(args, stdout=GPU_CSV)
 
-    gpus, error = collect_gpus(
-        runner=runner, timeout=5.0, clock=lambda: next(ticks)
-    )
+    gpus, error = collect_gpus(runner=runner, timeout=5.0, clock=lambda: next(ticks))
 
     assert len(calls) == 1
     assert [gpu.compute_processes for gpu in gpus] == [None, None]
@@ -445,9 +435,7 @@ def test_collect_gpus_applies_compute_rows_when_another_gpu_row_is_malformed():
 def test_collect_gpus_counts_processes_with_unknown_memory():
     compute = "GPU-aaa, 111, python, [N/A]\nGPU-aaa, 222, python, 256\n"
 
-    gpus, error = collect_gpus(
-        runner=dispatch_runner(gpu_stdout=GPU_CSV, compute_stdout=compute)
-    )
+    gpus, error = collect_gpus(runner=dispatch_runner(gpu_stdout=GPU_CSV, compute_stdout=compute))
 
     assert error is None
     assert gpus[0].compute_processes == 2
@@ -458,9 +446,7 @@ def test_collect_gpus_counts_processes_with_unknown_memory():
 def test_collect_gpus_reports_unattributable_compute_uuid():
     compute = "GPU-zzz, 999, python, 4096\n"
 
-    gpus, error = collect_gpus(
-        runner=dispatch_runner(gpu_stdout=GPU_CSV, compute_stdout=compute)
-    )
+    gpus, error = collect_gpus(runner=dispatch_runner(gpu_stdout=GPU_CSV, compute_stdout=compute))
 
     assert [gpu.compute_processes for gpu in gpus] == [None, None]
     assert [gpu.compute_memory_bytes for gpu in gpus] == [None, None]
@@ -471,9 +457,7 @@ def test_collect_gpus_reports_unattributable_compute_uuid():
 def test_collect_gpus_keeps_matched_counts_when_another_uuid_is_unattributable():
     compute = "GPU-aaa, 111, python, 512\nGPU-zzz, 999, python, 4096\n"
 
-    gpus, error = collect_gpus(
-        runner=dispatch_runner(gpu_stdout=GPU_CSV, compute_stdout=compute)
-    )
+    gpus, error = collect_gpus(runner=dispatch_runner(gpu_stdout=GPU_CSV, compute_stdout=compute))
 
     assert gpus[0].compute_processes == 1
     assert gpus[0].compute_memory_bytes == 512 * 1024 * 1024
@@ -826,9 +810,7 @@ def test_cache_filesystem_usage_sums_distinct_devices(tmp_path):
 
     total, free, error = cache_filesystem_usage(
         [first, second],
-        stat=lambda path: SimpleNamespace(
-            st_dev=devices[path], st_mode=stat.S_IFDIR
-        ),
+        stat=lambda path: SimpleNamespace(st_dev=devices[path], st_mode=stat.S_IFDIR),
         disk_usage=lambda path: usages[path],
     )
 
@@ -987,9 +969,7 @@ def test_collect_metrics_includes_cache_filesystem_capacity(tmp_path):
 
 
 def test_collect_metrics_uses_default_cache_usage_sampler(tmp_path, monkeypatch):
-    monkeypatch.setattr(
-        metrics, "cache_filesystem_usage", lambda roots: (1000, 250, None)
-    )
+    monkeypatch.setattr(metrics, "cache_filesystem_usage", lambda roots: (1000, 250, None))
 
     snapshot = collect_metrics(
         [tmp_path / "hub"],
@@ -1186,9 +1166,7 @@ def test_collect_metrics_nulls_half_known_capacity(tmp_path, capacity):
     [(1000, None, "one root failed"), (None, 250, "one root failed")],
     ids=["total-only", "free-only"],
 )
-def test_collect_metrics_nulls_half_known_capacity_beside_partial_error(
-    tmp_path, capacity
-):
+def test_collect_metrics_nulls_half_known_capacity_beside_partial_error(tmp_path, capacity):
     snapshot = collect_metrics(
         [tmp_path / "hub"],
         meminfo_path=write_meminfo(tmp_path),
