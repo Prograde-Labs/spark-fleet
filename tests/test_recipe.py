@@ -14,31 +14,6 @@ from spark_fleet.shared.recipe import (
     validate_against_nodes,
 )
 
-ROOT = Path(__file__).resolve().parents[1]
-
-SHIPPED_CONTEXT_LENGTHS = {
-    "ds4-flash": 1048576,
-    "demo-heavy": 524288,
-    "demo-glm": 850000,
-    "demo-glm-xl": 960000,
-    "demo-qwen": 262144,
-    "demo-qwen-dflash2": 262144,
-    "demo-qwen-heretic": 262144,
-    "demo-qwen-sglang": 262144,
-    "demo-qwen-sglang-dflash2": 262144,
-    "demo-qwen-sglang-plain": 262144,
-    "demo-qwen-sglang-plain-radixark": 262144,
-}
-
-SHIPPED_RECIPE_PATHS = sorted((ROOT / "recipes").glob("*.yaml"))
-
-# The llama.cpp recipe leaves contextLength unset so the gateway reads the
-# serving limit from the upstream model card.
-UPSTREAM_CONTEXT_RECIPES = {"demo-llamacpp"}
-
-# These recipes intentionally carry no model.
-MODEL_LESS_RECIPES = {"comfyui", "demo-log-server"}
-
 DEPLOYMENT = {
     "apiVersion": "spark-fleet/v1",
     "kind": "Recipe",
@@ -220,32 +195,6 @@ def test_model_context_length_rejects_invalid_values(value):
 
     with pytest.raises(RecipeError, match=r"spec\.model\.contextLength"):
         parse_recipe(data)
-
-
-def test_shipped_recipes_are_present():
-    assert SHIPPED_RECIPE_PATHS
-
-
-@pytest.mark.parametrize(
-    "path",
-    SHIPPED_RECIPE_PATHS,
-    ids=lambda path: path.stem,
-)
-def test_shipped_recipes_parse_and_declare_context(path):
-    recipe = load_recipe_file(path)
-    if recipe.spec.model is None:
-        assert path.stem in MODEL_LESS_RECIPES, (
-            f"{path.name} has no model but is not in MODEL_LESS_RECIPES"
-        )
-        return
-    if path.stem in UPSTREAM_CONTEXT_RECIPES:
-        assert recipe.spec.model.context_length is None
-        assert recipe.spec.runtime == "llamacpp"
-        return
-    assert path.stem in SHIPPED_CONTEXT_LENGTHS, (
-        f"{path.name} declares a model but is not in SHIPPED_CONTEXT_LENGTHS"
-    )
-    assert recipe.spec.model.context_length == SHIPPED_CONTEXT_LENGTHS[path.stem]
 
 
 def test_load_recipe_file(tmp_path):

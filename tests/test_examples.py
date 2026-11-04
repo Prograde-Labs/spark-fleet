@@ -6,7 +6,7 @@ import pytest
 
 from spark_fleet.shared.recipe import parse_recipe_yaml, validate_against_nodes
 
-EXAMPLES = Path(__file__).resolve().parents[1] / "recipes" / "examples"
+EXAMPLES = Path(__file__).resolve().parents[1] / "recipes"
 NODES = {"spark-01", "spark-02"}
 
 

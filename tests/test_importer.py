@@ -399,7 +399,10 @@ async def test_plan_sanitizes_folded_prepare_fields():
     )
     sources = fake_sources(
         [workload("demo-glm-head"), workload("demo-glm-pull-helper", "light", None, ())],
-        {"demo-glm-head": instance_yaml(name="demo-glm-head"), "demo-glm-pull-helper": helper_config},
+        {
+            "demo-glm-head": instance_yaml(name="demo-glm-head"),
+            "demo-glm-pull-helper": helper_config,
+        },
     )
 
     plan = await Importer(NODES).plan(sources)
@@ -499,7 +502,10 @@ async def test_plan_reports_unusable_folded_helper():
     )
     sources = fake_sources(
         [workload("demo-glm-head"), workload("demo-glm-pull-helper", "light", None, ())],
-        {"demo-glm-head": instance_yaml(name="demo-glm-head"), "demo-glm-pull-helper": helper_config},
+        {
+            "demo-glm-head": instance_yaml(name="demo-glm-head"),
+            "demo-glm-pull-helper": helper_config,
+        },
     )
 
     plan = await Importer(NODES).plan(sources)

@@ -176,12 +176,12 @@ before applying; redeploy the deployment to activate the new model.
 
 ## Examples
 
-- `recipes/examples/vllm-multi-node.yaml` — two-node vLLM over the fabric
-- `recipes/examples/tensorfold-single.yaml` — TensorFold EXL3 single node
-- `recipes/examples/sglang-single.yaml` — SGLang OpenAI-compatible server
-- `recipes/examples/llamacpp-single.yaml` — GGUF model with a mounted cache
-- `recipes/examples/openwebui-service.yaml` — independent chat UI service
-- `recipes/examples/comfyui-service.yaml` — independent image-generation service
+- `recipes/vllm-multi-node.yaml` — two-node vLLM over the fabric
+- `recipes/tensorfold-single.yaml` — TensorFold EXL3 single node
+- `recipes/sglang-single.yaml` — SGLang OpenAI-compatible server
+- `recipes/llamacpp-single.yaml` — GGUF model with a mounted cache
+- `recipes/openwebui-service.yaml` — independent chat UI service
+- `recipes/comfyui-service.yaml` — independent image-generation service
 
 All examples parse against the schema and target `spark-01`/`spark-02`.
 
