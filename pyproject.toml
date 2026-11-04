@@ -7,7 +7,31 @@ name = "spark-fleet"
 dynamic = ["version"]
 description = "Multi-node DGX Spark workload control plane"
 readme = "README.md"
+license = "Apache-2.0"
+license-files = ["LICENSE", "NOTICE"]
+authors = [{ name = "Prograde Labs" }]
 requires-python = ">=3.12"
+keywords = [
+  "dgx-spark",
+  "gpu",
+  "inference",
+  "docker-compose",
+  "control-plane",
+  "vllm",
+  "sglang",
+  "llama-cpp",
+]
+classifiers = [
+  "Development Status :: 4 - Beta",
+  "Intended Audience :: Developers",
+  "Intended Audience :: System Administrators",
+  "License :: OSI Approved :: Apache Software License",
+  "Operating System :: POSIX :: Linux",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3.12",
+  "Programming Language :: Python :: 3.13",
+  "Topic :: System :: Systems Administration",
+]
 dependencies = [
   "docker>=7.1,<8",
   "fastapi>=0.116,<1",
@@ -27,6 +51,12 @@ dev = [
 [project.scripts]
 spark-fleet-controller = "spark_fleet.controller.main:main"
 spark-fleet-agent = "spark_fleet.agent.main:main"
+
+[project.urls]
+Homepage = "https://github.com/Prograde-Labs/spark-fleet"
+Repository = "https://github.com/Prograde-Labs/spark-fleet"
+Issues = "https://github.com/Prograde-Labs/spark-fleet/issues"
+Security = "https://github.com/Prograde-Labs/spark-fleet/security"
 
 [tool.hatch.version]
 path = "src/spark_fleet/__init__.py"

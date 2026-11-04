@@ -1,5 +1,8 @@
 # spark-fleet
 
+[![CI](https://github.com/Prograde-Labs/spark-fleet/actions/workflows/ci.yml/badge.svg)](https://github.com/Prograde-Labs/spark-fleet/actions/workflows/ci.yml)
+[![License: Apache-2.0](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
+
 Multi-node DGX Spark workload control plane.
 
 A controller on the head Spark owns recipes, deployments, the fleet gateway, and
@@ -135,7 +138,6 @@ optional prepare jobs. A service declares one light role managed independently.
 Example recipes are under `recipes/`. See [docs/recipes.md](docs/recipes.md)
 for authoring details.
 
-
 ## Security boundary
 
 This release targets the trusted LAN only. The controller API, UI, gateway, and
@@ -150,6 +152,20 @@ mount only the Docker socket plus narrow data and model-cache paths. See
 - [Architecture](docs/architecture.md)
 - [Security and LAN boundary](docs/security.md)
 - [Recipe authoring](docs/recipes.md)
+
+## Contributing
+
+Contributions are welcome. See [CONTRIBUTING.md](CONTRIBUTING.md) for local
+setup and the checks expected before a pull request, and
+[CODE_OF_CONDUCT.md](CODE_OF_CONDUCT.md) for community expectations.
+
+Do not open a public issue for a suspected vulnerability; see
+[SECURITY.md](SECURITY.md) instead.
+
+## License
+
+Licensed under the [Apache License, Version 2.0](LICENSE). See [NOTICE](NOTICE)
+for attribution.
 
 ## Status
 

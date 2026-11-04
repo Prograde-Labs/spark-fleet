@@ -2,6 +2,12 @@
   "name": "spark-fleet-web",
   "private": true,
   "version": "0.1.0",
+  "description": "Mission-control web UI for the spark-fleet control plane",
+  "license": "Apache-2.0",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/Prograde-Labs/spark-fleet"
+  },
   "type": "module",
   "scripts": {
     "dev": "vite",

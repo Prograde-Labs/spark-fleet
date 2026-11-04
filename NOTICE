@@ -1,0 +1,7 @@
+spark-fleet
+Copyright 2026 Prograde Labs
+
+This product is licensed under the Apache License, Version 2.0 (see LICENSE).
+
+Third-party dependencies remain under their own licenses. See the package
+metadata in pyproject.toml and web/package.json for the dependency set.

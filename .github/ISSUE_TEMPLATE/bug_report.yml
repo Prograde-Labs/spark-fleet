@@ -1,0 +1,79 @@
+name: Bug report
+description: Report a reproducible defect in spark-fleet
+title: "[Bug]: "
+labels: ["bug", "triage"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for taking the time to report a bug. Do not include secrets,
+        real hostnames, IP addresses, host paths, or production recipes.
+        For security vulnerabilities, use the repository's Security tab
+        instead of opening a public issue.
+  - type: textarea
+    id: description
+    attributes:
+      label: What happened?
+      description: A clear description of the defect and what you expected instead.
+    validations:
+      required: true
+  - type: textarea
+    id: reproduce
+    attributes:
+      label: Steps to reproduce
+      description: Minimal steps, commands, or recipe excerpts that reproduce the issue.
+      placeholder: |
+        1. ...
+        2. ...
+        3. ...
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: Version or commit
+      description: Output of `git rev-parse --short HEAD`, or the release you are running.
+    validations:
+      required: true
+  - type: dropdown
+    id: component
+    attributes:
+      label: Component
+      options:
+        - Controller API
+        - Agent API
+        - Gateway
+        - Deployment lifecycle
+        - Importer
+        - Web UI
+        - Recipes or rendering
+        - Documentation
+        - Other
+    validations:
+      required: true
+  - type: textarea
+    id: environment
+    attributes:
+      label: Environment
+      description: Python and Node versions, OS/architecture, Docker version, and node count.
+      placeholder: |
+        Python: 3.12.x
+        Node: 20.x
+        OS: Ubuntu 24.04 arm64
+        Docker: 27.x
+        Nodes: 2
+  - type: textarea
+    id: logs
+    attributes:
+      label: Relevant logs or output
+      description: Paste sanitized logs. Remove tokens, credentials, and host details.
+      render: shell
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Checklist
+      options:
+        - label: I removed secrets, real IPs/hostnames, and production recipe details.
+          required: true
+        - label: This is not a security vulnerability (those go through the Security tab).
+          required: true
