@@ -10,6 +10,23 @@ a dark mission-control UI. Each Spark node runs a small agent that executes
 Docker Compose workloads, model-cache operations, log streaming, and telemetry
 locally. Agents are the only components with a Docker socket.
 
+## Screenshots
+
+Captured from the mission-control SPA running against synthetic demo data — no
+real hosts, addresses, models, or deployments appear in these images.
+
+![Fleet Overview](docs/images/overview.png)
+
+| Deployments | Node Registry |
+| --- | --- |
+| ![Deployments](docs/images/deployments.png) | ![Node Registry](docs/images/nodes.png) |
+
+| Model Vault | Recipe Editor |
+| --- | --- |
+| ![Model Vault](docs/images/models.png) | ![Recipe Editor](docs/images/recipes.png) |
+
+![Activity Log](docs/images/activity.png)
+
 ## Layout
 
 ```
