@@ -28,7 +28,13 @@ from spark_fleet.controller.deployments import DeploymentManager, project_name
 from spark_fleet.controller.gateway import FleetGateway
 from spark_fleet.controller.metrics import MetricsStore
 from spark_fleet.controller.nodes import NodeRegistry, NodeStatus
-from spark_fleet.shared.config import ConfigError, ControllerConfig, load_controller_config
+from spark_fleet.shared.config import (
+    GATEWAY_TIMEOUT_MAX_SECONDS,
+    GATEWAY_TIMEOUT_MIN_SECONDS,
+    ConfigError,
+    ControllerConfig,
+    load_controller_config,
+)
 from spark_fleet.shared.db import Database, DatabaseError
 from spark_fleet.shared.events import Event, EventBus
 from spark_fleet.shared.jobs import JobRunner
@@ -339,7 +345,7 @@ def create_controller(
         rollback_policy=effective.rollback_policy,
         client_factory=client_factory,
     )
-    gateway = FleetGateway(db)
+    gateway = FleetGateway(db, timeout=float(effective.gateway_timeout_seconds))
     metrics = MetricsStore(db)
     factory: ClientFactory = client_factory or AgentClient
 
@@ -436,6 +442,12 @@ def _apply_stored_settings(config: ControllerConfig, db: Database) -> Controller
         ),
         node_poll_interval_seconds=integer(
             "node_poll_interval_seconds", config.node_poll_interval_seconds, 1, 3600
+        ),
+        gateway_timeout_seconds=integer(
+            "gateway_timeout_seconds",
+            config.gateway_timeout_seconds,
+            GATEWAY_TIMEOUT_MIN_SECONDS,
+            GATEWAY_TIMEOUT_MAX_SECONDS,
         ),
     )
 

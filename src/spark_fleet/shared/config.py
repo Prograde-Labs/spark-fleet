@@ -29,6 +29,11 @@ class ConfigError(ValueError):
     """Raised when an environment-derived configuration value is invalid."""
 
 
+GATEWAY_TIMEOUT_MIN_SECONDS = 30
+GATEWAY_TIMEOUT_MAX_SECONDS = 86400
+DEFAULT_GATEWAY_TIMEOUT_SECONDS = 1800
+
+
 @dataclass(frozen=True)
 class ControllerConfig:
     host: str
@@ -44,6 +49,7 @@ class ControllerConfig:
     metrics_retention_seconds: int = 86400
     metrics_sample_interval_seconds: int = 10
     node_poll_interval_seconds: int = 15
+    gateway_timeout_seconds: int = DEFAULT_GATEWAY_TIMEOUT_SECONDS
     log_level: str = "INFO"
 
 
@@ -238,6 +244,13 @@ def load_controller_config(env: Mapping[str, str] | None = None) -> ControllerCo
             env, "SPARK_FLEET_METRICS_SAMPLE_INTERVAL_SECONDS", 10, 1, 3600
         ),
         node_poll_interval_seconds=_int(env, "SPARK_FLEET_NODE_POLL_INTERVAL_SECONDS", 15, 1, 3600),
+        gateway_timeout_seconds=_int(
+            env,
+            "SPARK_FLEET_GATEWAY_TIMEOUT_SECONDS",
+            DEFAULT_GATEWAY_TIMEOUT_SECONDS,
+            GATEWAY_TIMEOUT_MIN_SECONDS,
+            GATEWAY_TIMEOUT_MAX_SECONDS,
+        ),
         log_level=_log_level(env, "SPARK_FLEET_LOG_LEVEL"),
     )
 

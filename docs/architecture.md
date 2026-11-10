@@ -77,6 +77,13 @@ flag, and apply the rollback policy: `restore` reloads displaced deployments,
 - `POST /v1/*` rewrites the JSON model field to the served name, strips
   hop-by-hop headers plus client credentials, forwards query strings, and
   filters stale response encoding headers.
+- The upstream client timeout is `SPARK_FLEET_GATEWAY_TIMEOUT_SECONDS` (1800s
+  default, also settable as the stored `gateway_timeout_seconds` setting). It
+  bounds each wait for upstream data, notably the first-byte wait while a
+  prompt prefill completes, and aborts a stalled stream. It must exceed the
+  slowest prefill: aborting a 256k-token prefill makes the client retry, and
+  the retries keep every stream busy pre-filling the same context. Connect
+  attempts are capped at 10s separately.
 
 ## Telemetry and state
 

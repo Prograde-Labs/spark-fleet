@@ -27,6 +27,7 @@ def test_controller_defaults():
     assert config.metrics_retention_seconds == 86400
     assert config.metrics_sample_interval_seconds == 10
     assert config.node_poll_interval_seconds == 15
+    assert config.gateway_timeout_seconds == 1800
     assert config.log_level == "INFO"
 
 
@@ -46,6 +47,7 @@ def test_controller_overrides():
             "SPARK_FLEET_METRICS_RETENTION_SECONDS": "3600",
             "SPARK_FLEET_METRICS_SAMPLE_INTERVAL_SECONDS": "5",
             "SPARK_FLEET_NODE_POLL_INTERVAL_SECONDS": "30",
+            "SPARK_FLEET_GATEWAY_TIMEOUT_SECONDS": "3600",
             "SPARK_FLEET_LOG_LEVEL": "debug",
         }
     )
@@ -62,6 +64,7 @@ def test_controller_overrides():
     assert config.metrics_retention_seconds == 3600
     assert config.metrics_sample_interval_seconds == 5
     assert config.node_poll_interval_seconds == 30
+    assert config.gateway_timeout_seconds == 3600
     assert config.log_level == "DEBUG"
 
 
@@ -223,6 +226,23 @@ def test_controller_rejects_zero_node_poll_interval():
         load_controller_config(
             {"SPARK_FLEET_AGENT_TOKEN": TOKEN, "SPARK_FLEET_NODE_POLL_INTERVAL_SECONDS": "0"}
         )
+
+
+@pytest.mark.parametrize("value", ["0", "29", "86401", "1800.5", "soon"])
+def test_controller_rejects_invalid_gateway_timeout(value):
+    with pytest.raises(ConfigError, match="SPARK_FLEET_GATEWAY_TIMEOUT_SECONDS"):
+        load_controller_config(
+            {"SPARK_FLEET_AGENT_TOKEN": TOKEN, "SPARK_FLEET_GATEWAY_TIMEOUT_SECONDS": value}
+        )
+
+
+@pytest.mark.parametrize("value", ["30", "1800", "86400"])
+def test_controller_accepts_gateway_timeout_bounds(value):
+    config = load_controller_config(
+        {"SPARK_FLEET_AGENT_TOKEN": TOKEN, "SPARK_FLEET_GATEWAY_TIMEOUT_SECONDS": value}
+    )
+
+    assert config.gateway_timeout_seconds == int(value)
 
 
 def test_controller_derived_paths_follow_data_dir():
