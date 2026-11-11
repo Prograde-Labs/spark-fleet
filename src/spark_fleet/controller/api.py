@@ -25,6 +25,10 @@ from spark_fleet.controller.importer import (
 )
 from spark_fleet.controller.metrics import MetricsStore
 from spark_fleet.controller.nodes import NodeError, NodeRegistry, NodeStatus
+from spark_fleet.shared.config import (
+    GATEWAY_TIMEOUT_MAX_SECONDS,
+    GATEWAY_TIMEOUT_MIN_SECONDS,
+)
 from spark_fleet.shared.db import Database
 from spark_fleet.shared.events import EventBus
 from spark_fleet.shared.jobs import JobRunner
@@ -65,6 +69,9 @@ _SETTING_RULES = {
     "metrics_retention_seconds": lambda value: _integer_setting(value, 60, 30 * 86400),
     "metrics_sample_interval_seconds": lambda value: _integer_setting(value, 1, 3600),
     "node_poll_interval_seconds": lambda value: _integer_setting(value, 1, 3600),
+    "gateway_timeout_seconds": lambda value: _integer_setting(
+        value, GATEWAY_TIMEOUT_MIN_SECONDS, GATEWAY_TIMEOUT_MAX_SECONDS
+    ),
 }
 
 
@@ -131,6 +138,7 @@ def build_app(
             "gateway": {
                 "activeAlias": "spark-active",
                 "modelsPath": "/v1/models",
+                "timeoutSeconds": gateway.timeout,
             },
         }
 

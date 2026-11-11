@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
 from types import SimpleNamespace
 
 import pytest
@@ -468,6 +469,7 @@ def test_stored_settings_override_environment_defaults(tmp_path):
     first.db.set_setting("metrics_retention_seconds", "120")
     first.db.set_setting("metrics_sample_interval_seconds", "5")
     first.db.set_setting("node_poll_interval_seconds", "30")
+    first.db.set_setting("gateway_timeout_seconds", "600")
     first.db.close()
 
     second = create_controller(config, client_factory=FakeAgentClient)
@@ -476,6 +478,8 @@ def test_stored_settings_override_environment_defaults(tmp_path):
     assert second.config.metrics_retention_seconds == 120
     assert second.config.metrics_sample_interval_seconds == 5
     assert second.config.node_poll_interval_seconds == 30
+    assert second.config.gateway_timeout_seconds == 600
+    assert second.gateway.timeout == 600.0
     second.db.close()
 
 
@@ -485,6 +489,7 @@ def test_invalid_stored_settings_fall_back(tmp_path):
     first.db.set_setting("rollback_policy", "explode")
     first.db.set_setting("metrics_retention_seconds", "not-a-number")
     first.db.set_setting("node_poll_interval_seconds", "99999")
+    first.db.set_setting("gateway_timeout_seconds", "29")
     first.db.close()
 
     second = create_controller(config, client_factory=FakeAgentClient)
@@ -492,4 +497,15 @@ def test_invalid_stored_settings_fall_back(tmp_path):
     assert second.config.rollback_policy == "restore"
     assert second.config.metrics_retention_seconds == 86400
     assert second.config.node_poll_interval_seconds == 15
+    assert second.config.gateway_timeout_seconds == 1800
     second.db.close()
+
+
+def test_gateway_receives_configured_timeout(tmp_path):
+    config = replace(make_config(tmp_path), gateway_timeout_seconds=3600)
+
+    controller = create_controller(config, client_factory=FakeAgentClient)
+    try:
+        assert controller.gateway.timeout == 3600.0
+    finally:
+        controller.db.close()

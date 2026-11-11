@@ -26,11 +26,13 @@ from typing import Any
 import httpx
 
 from spark_fleet.controller.metrics import MetricsStore
+from spark_fleet.shared.config import DEFAULT_GATEWAY_TIMEOUT_SECONDS
 from spark_fleet.shared.db import Database
 from spark_fleet.shared.recipe import RecipeError, parse_recipe
 
 LOADING_STATUSES = frozenset({"pending", "loading", "starting"})
 UPSTREAM_CONTEXT_TIMEOUT_SECONDS = 2.0
+CONNECT_TIMEOUT_SECONDS = 10.0
 UPSTREAM_CONTEXT_CACHE_TTL_SECONDS = 30.0
 UPSTREAM_CONTEXT_NEGATIVE_TTL_SECONDS = 5.0
 _STRIP_REQUEST = frozenset(
@@ -195,10 +197,17 @@ class FleetGateway:
         db: Database,
         *,
         transport: httpx.AsyncBaseTransport | None = None,
-        timeout: float = 300.0,
+        timeout: float = DEFAULT_GATEWAY_TIMEOUT_SECONDS,
     ):
         self._db = db
-        self._client = httpx.AsyncClient(timeout=timeout, transport=transport)
+        self.timeout = timeout
+        # The read timeout bounds each wait for upstream data (including the
+        # first byte while a prompt prefill completes); connect is capped so a
+        # blackholed node fails fast instead of hanging for the full timeout.
+        self._client = httpx.AsyncClient(
+            timeout=httpx.Timeout(timeout, connect=min(timeout, CONNECT_TIMEOUT_SECONDS)),
+            transport=transport,
+        )
         self.counters = InferenceCounters()
         self._context_cache: dict[tuple[str, str], tuple[float, int | None]] = {}
 

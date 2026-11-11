@@ -926,6 +926,18 @@ def test_extract_usage_from_response():
     assert extract_usage(httpx.Response(200, text="not json")) == (0, 0)
 
 
+def test_gateway_exposes_configured_timeout(db):
+    assert FleetGateway(db).timeout == 1800.0
+    assert FleetGateway(db, timeout=42.0).timeout == 42.0
+
+
+def test_gateway_caps_connect_timeout(db):
+    gateway = FleetGateway(db, timeout=600.0)
+
+    assert gateway._client.timeout.read == 600.0
+    assert gateway._client.timeout.connect == 10.0
+
+
 async def test_gateway_close(db):
     gateway = FleetGateway(db)
 

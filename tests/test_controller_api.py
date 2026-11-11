@@ -907,6 +907,16 @@ def test_settings_round_trip(env):
     assert env.client.put("/api/settings/theme", json={"value": "dark"}).status_code == 400
 
 
+def test_gateway_timeout_setting_validates_range(env):
+    put = env.client.put("/api/settings/gateway_timeout_seconds", json={"value": "600"})
+    assert put.status_code == 200
+    assert env.client.get("/api/settings").json()["settings"] == {"gateway_timeout_seconds": "600"}
+
+    for value in ("29", "86401", "1800.5", "soon"):
+        response = env.client.put("/api/settings/gateway_timeout_seconds", json={"value": value})
+        assert response.status_code == 400
+
+
 # Import -------------------------------------------------------------------
 
 
@@ -1389,7 +1399,11 @@ def test_config_endpoint_reports_effective_settings(env):
     assert body["metricsSampleIntervalSeconds"] == 10
     assert body["nodePollIntervalSeconds"] == 15
     assert body["authEnabled"] is False
-    assert body["gateway"] == {"activeAlias": "spark-active", "modelsPath": "/v1/models"}
+    assert body["gateway"] == {
+        "activeAlias": "spark-active",
+        "modelsPath": "/v1/models",
+        "timeoutSeconds": 1800,
+    }
 
 
 def test_secured_config_is_public_but_settings_are_not(secured_env):
